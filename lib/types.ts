@@ -20,3 +20,17 @@ export function createError<Tag extends string, Props = {}>(tag: Tag) {
     }
   } as new (props: Props) => TaggedError<Tag> & Readonly<Props>;
 }
+
+export type Serializable =
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | bigint
+  | Date
+  | RegExp
+  | Serializable[]
+  | { [key: string]: Serializable }
+  | Map<Serializable, Serializable>
+  | Set<Serializable>;
