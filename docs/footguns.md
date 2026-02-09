@@ -12,7 +12,7 @@ Bad usage:
 
 ```js
 function onArcnet(req, env, ctx) {
-  setTimeout(() => env.reply("Ping!"), 3_000);
+  setTimeout(() => env.send(req.sender, "Ping!"), 3_000);
   return "I'll send you a request soon!";
 }
 ```
@@ -20,13 +20,16 @@ function onArcnet(req, env, ctx) {
 Good usage:
 
 ```js
-function onArcnet(req, env, ctx) {
-  let timerId = ctx.addTimer({ sender: req.sender, message: "Ping!" }, 3_000);
+async function onArcnet(req, env, ctx) {
+  let timerId = await ctx.addTimer(
+    { sender: req.sender, message: "Ping!" },
+    3_000,
+  );
   return `I'll send you a request soon! Timer ID: ${timerId}`;
 }
 
-function onTimer(event, env, ctx) {
-  env.send(event.sender, event.message);
+async function onTimer(event, env, ctx) {
+  await env.send(event.sender, event.message);
 }
 ```
 

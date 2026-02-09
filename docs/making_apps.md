@@ -65,9 +65,15 @@ async function onHttp(request, env, ctx) {
 }
 
 async function onArcnet(request, env, ctx) {
+  let timerId = await ctx.addTimer(
+    { sender: req.sender, message: "Ping!" },
+    3_000,
+  );
+  return `I'll send you a request soon! Timer ID: ${timerId}`;
 }
 
 async function onTimer(event, env, ctx) {
+  await env.send(event.sender, event.message);
 }
 
 export { onArcnet, onHttp, onTimer };
