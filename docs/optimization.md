@@ -20,7 +20,8 @@ The available modes are
 
 ## Blocking code
 
-Don't do this. Instead, please create a new process for any blocking computations.
+Don't do this. Instead, please create a new process for any blocking
+computations.
 
 ## Footnotes
 
