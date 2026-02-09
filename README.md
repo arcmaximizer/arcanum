@@ -1,4 +1,4 @@
-# Arcanum
+![Arcanum](./header.png)
 
 Deterministic, functional, sovereign. Arcanum is personal server software
 allowing you to build applications in TypeScript that benefit from
