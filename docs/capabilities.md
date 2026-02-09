@@ -6,7 +6,7 @@ capabilities through one of three ways:
 
 1. During installation in `arcanum.yaml`
 2. Message passing from the app
-3. Requesting it from the settings app
+3. Requesting it from `sys/settings`
 
 Capabilities are not just strings: they are objects with a name and additional
 optional metadata.
@@ -21,7 +21,7 @@ the capability `sys/http:send`, it will automatically send that capability along
 with your message.
 
 If an Arcanum receives a message with an invalid set of capabilities, it will
-not hit the app at all. Instead, it will be responded to with a
+not reach the app at all. Instead, it will be responded to with a
 `CapabilityError`.
 
 ## Usage

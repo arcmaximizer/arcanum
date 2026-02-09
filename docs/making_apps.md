@@ -24,15 +24,15 @@ Let's take a look inside the `arcanum.yaml` to see what's going on:
 id: local/my-app
 version: 0.0.0
 name: My App
-desc: Callback!
+desc: My awesome application
 entrypoint: main.ts
 
 capabilities:
   - sys/http:receive
   - sys/arcnet:send,receive
-arcnet:
-  aliases:
-    - #my-app
+
+domains:
+  - my-app@*
 ```
 
 The `local` developer is a reserved developer ID in the Arcanum namespace and is
@@ -56,7 +56,7 @@ async function onHttp(request, env, ctx) {
       path: path,
       visits: newCount,
       message:
-        `This app has been visited ${newCount} time(s). Message me over Arcnet at #my-app@${env.nodeId} to get a callback!`,
+        `This app has been visited ${newCount} time(s). Message me over Arcnet at local/my-app@${env.nodeId} to get a callback!`,
     }),
     {
       headers: { "Content-Type": "application/json" },
@@ -78,3 +78,10 @@ async function onTimer(event, env, ctx) {
 
 export { onArcnet, onHttp, onTimer };
 ```
+
+You can deploy this app on your very own Arcanum node using
+`dx arcanum-cli push .`
+
+Once pushed, you should be able to access it at `my-app--local.tryarcanum.org`,
+which forwards to localhost. If your Arcanum is running at a different IP, use
+`my-app--<nodename>.tryarcanum.org`.
