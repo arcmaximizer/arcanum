@@ -10,9 +10,9 @@ If you're an outside contributor, create a feature branch on your local reposito
 
 ## CLAs and Funky Legal Business
 
-The project is currently licensed under the GNU General Public License 3.0, but we want to be able to offer some users more permissive licenses in the future. As such, you'll have to sign a CLA to grant Arc (that's me!) a perpetual license to sublicense your contributions later on.
+The project is currently licensed under the GNU General Public License 3.0, but we want to be able to offer some users more permissive licenses in the future. As such, you'll have to sign a CLA to grant us a perpetual license to sublicense your contributions later on.
 
-The CLA bot will do this for you on your PR.
+The CLA bot will do this for you on your PR. You can also view the CLA at [the CLA.md file](./CLA.md]).
 
 ## Questions?
 
