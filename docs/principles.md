@@ -7,7 +7,6 @@
 5. But if possible, be pure and practical.
 6. And if it's not, you're probably doing it wrong.
 7. Be kind to your API consumers.
-8. Do not judge an app by its ID or host, but by the content of its
-   capabilities.
+8. Do not judge an app by its ID, but by the content of its capabilities.
 9. Build your app to last a thousand years.
 10. Don't block the thread.
