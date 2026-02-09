@@ -1,6 +1,6 @@
 import { Branded } from "../lib/types";
 
-export interface NetworkService {
+export interface ArcnetService {
   send(message: Message): Promise<boolean>;
   send(to: ReceiverId, content: string | Uint8Array);
 }
