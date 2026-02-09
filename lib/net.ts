@@ -1,4 +1,4 @@
-import { Branded, createError, Serializable } from "../lib/types";
+import { Branded, createError, Serializable } from "./types";
 
 export const NetworkError = createError<"NetworkError", {}>("NetworkError");
 
