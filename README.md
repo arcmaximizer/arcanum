@@ -5,6 +5,8 @@ allowing you to build applications in TypeScript that benefit from
 version-controlled state and upgrades, peer-to-peer networking and more as a
 pure function of the event log.
 
+# EXTREMELY EXPERIMENTAL
+
 ## Installation
 
 It is recommended to run Arcanum using Docker.
