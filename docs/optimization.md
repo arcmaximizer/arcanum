@@ -13,7 +13,7 @@ throughput.
 For example, let's say your app receives hundreds of events to increment a
 counter. By default, all of them will run concurrently[^2].
 
-The available modes are
+The available modes are:
 
 - `occ`: Optimistic Concurrency Control (default)
 - `serial`: Process only one request at a time

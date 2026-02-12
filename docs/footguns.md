@@ -12,7 +12,7 @@ Bad usage:
 
 ```js
 function onArcnet(req, env, ctx) {
-  setTimeout(() => env.send(req.sender, "Ping!"), 3_000);
+  setTimeout(() => ctx.send(req.sender, "Ping!"), 3_000);
   return "I'll send you a request soon!";
 }
 ```
@@ -29,7 +29,7 @@ async function onArcnet(req, env, ctx) {
 }
 
 async function onTimer(event, env, ctx) {
-  await env.send(event.sender, event.message);
+  await ctx.send(event.sender, event.message);
 }
 ```
 
