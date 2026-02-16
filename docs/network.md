@@ -42,7 +42,3 @@ async function onArcnet(req, env, ctx) {
   return "Hello world!";
 }
 ```
-
-## Runtime Extensions
-
-Arcanum uses

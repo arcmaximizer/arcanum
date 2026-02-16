@@ -33,7 +33,7 @@ async function onHttp(request, env, ctx) {
   console.log("We got a ping response from", key, "-", res);
 
   // Let's talk to a local app now
-  const res2 = await ctx.send("sys/echo@local", "ping!");
+  const res2 = await ctx.send("sys/echo", "ping!");
 
   // Return response
   return new Response(
@@ -51,7 +51,7 @@ async function onHttp(request, env, ctx) {
 The event log looks a bit like this:
 
 ```
-root event: receive HTTP request
+root event: (sys/http) receives HTTP request
  |---> receive reply from other Arcanum
  '---> reply & local execution of sys/echo
         '---> any side effects in the sys/echo program (we have none)

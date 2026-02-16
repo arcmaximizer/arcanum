@@ -28,11 +28,8 @@ desc: My awesome application
 entrypoint: main.ts
 
 capabilities:
-  - sys/http:receive
   - sys/arcnet:send,receive
-
-domains:
-  - my-app@*
+  - sys/timer:set
 ```
 
 The `local` developer is a reserved developer ID in the Arcanum namespace and is
@@ -41,42 +38,19 @@ trying to distribute them to other Arcanum nodes via the Storefront will not
 work.
 
 ```ts
-async function onHttp(request, env, ctx) {
-  const url = new URL(request.url);
-  const path = url.pathname;
-
-  const currentValue = await env.MY_KV.get(key);
-  const count = currentValue ? currentValue : 0;
-
-  await env.MY_KV.put(key, count + 1);
-
-  // Return response
-  return new Response(
-    JSON.stringify({
-      path: path,
-      visits: newCount,
-      message:
-        `This app has been visited ${newCount} time(s). Message me over Arcnet at local/my-app@${env.nodeId} to get a callback!`,
-    }),
-    {
-      headers: { "Content-Type": "application/json" },
-    },
-  );
+async function onEvent(event, env) {
+  if (env.process == "timer") {
+    env.send(event.to, event.message);
+  } else {
+    let timerId = await env.send(
+      "sys/timer",
+      { content: { to: env.process, message: "Ping!" }, delay: 3000 }
+    );
+    return `I'll send you a request soon! Timer ID: ${timerId}`;
+  }
 }
 
-async function onArcnet(request, env, ctx) {
-  let timerId = await ctx.addTimer(
-    { sender: req.sender, message: "Ping!" },
-    3_000,
-  );
-  return `I'll send you a request soon! Timer ID: ${timerId}`;
-}
-
-async function onTimer(event, env, ctx) {
-  await env.send(event.sender, event.message);
-}
-
-export { onArcnet, onHttp, onTimer };
+export default onEvent;
 ```
 
 You can deploy this app on your very own Arcanum node using
