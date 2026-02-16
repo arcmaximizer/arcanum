@@ -1,6 +1,7 @@
 declare const __brand: unique symbol;
 export type Brand<B> = { [__brand]: B };
 export type Branded<T, B> = T & Brand<B>;
+export type Unbrand<T> = T extends Brand<infer U, any> ? U : T;
 
 export class TaggedError<Tag extends string> extends Error {
   readonly _tag: Tag;
