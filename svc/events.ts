@@ -72,10 +72,12 @@ export class TransactionLog {
   }
 
   appendCurrent(tx: Transaction) {
+    const current = this.dag.getNode(this.current);
+
     if (this.dag.getNode(tx.id)) return;
 
     if (current) {
-      this.dag.addEdge({ id: this.current }, tx);
+      this.dag.addEdge({ id: this.current } as Transaction, tx);
     } else {
       this.dag.addNode(tx);
     }
