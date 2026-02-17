@@ -2,10 +2,11 @@
 
 There are some things you might want to do with your Arcanum that cannot be done
 using solely the functions offered by the runtime. You would need some kind of
-system *outside* of the standard Arcanum model to do this.
+system _outside_ of the standard Arcanum model to do this.
 
 This is called a runtime extension. Potential uses of runtime extensions
 include:
+
 - Discord bots via the Gateway
 - Native local GPU/inference API
 - DNS servers
@@ -15,25 +16,25 @@ As the Arcanum runtime cannot and will not support every single potential I/O
 method, it is up to developers to write this glue code.
 
 Runtime extensions **do not have their state tracked by Arcanum**. Just like I/O
-in general, it should be treated as fundamentally unreliable and ephemeral.
-A runtime extension will not maintain its state after a reboot as it is stored
+in general, it should be treated as fundamentally unreliable and ephemeral. A
+runtime extension will not maintain its state after a reboot as it is stored
 within the global scope.
 
 For example, here is a runtime extension which maintains a persistent WebSocket
 connection to an external server:
 
 ```ts
-let sockets: Map<string, WebSocket> = new Map()
+let sockets: Map<string, WebSocket> = new Map();
 
 export default function (req, env, ctx) {
   if (req.type == "open") {
     if (sockets.has(req.url)) return "already exists";
     const ws = new WebSocket(req.url);
     sockets.set(req.url, ws);
-    
+
     ws.onmessage = (e) => {
       ctx.send(env.from, e.data);
-    }
+    };
   }
 }
 ```

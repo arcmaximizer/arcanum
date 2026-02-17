@@ -7,5 +7,4 @@ transaction.**
 For example, let's take the following code:
 
 ```ts
-
 ```

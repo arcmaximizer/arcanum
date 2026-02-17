@@ -44,7 +44,7 @@ async function onEvent(event, env) {
   } else {
     let timerId = await env.send(
       "sys/timer",
-      { content: { to: env.process, message: "Ping!" }, delay: 3000 }
+      { content: { to: env.process, message: "Ping!" }, delay: 3000 },
     );
     return `I'll send you a request soon! Timer ID: ${timerId}`;
   }
