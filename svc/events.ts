@@ -88,9 +88,9 @@ export class TransactionLog {
     tx: Transaction,
   ): Result<void, typeof TxNotExistsError> {
     const node = this.dag.getNode(from);
-    
+
     if (!node) return err(new TxNotExistsError());
-    
+
     this.dag.addEdge(node, tx);
     if (from == this.current) this.current = tx.id;
     return ok();
