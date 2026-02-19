@@ -52,7 +52,11 @@ export interface TraversalState {
   readonly total: number;
 }
 
-export type DAGVisitor<C> = (id: string, state: TraversalState, context: C) => void;
+export type DAGVisitor<C> = (
+  id: string,
+  state: TraversalState,
+  context: C,
+) => void;
 
 // ---------------------------------------------------------------------------
 // Public interface
@@ -165,11 +169,15 @@ export function createDAG(
     // deno-lint-ignore no-explicit-any
     trx: Kysely<any> | Transaction<any>,
   ): Promise<Map<string, string[]>> {
-    const edges = await trx.selectFrom(edgesTable).selectAll().execute() as EdgeRow[];
+    const edges = await trx.selectFrom(edgesTable).selectAll()
+      .execute() as EdgeRow[];
     const out = new Map<string, string[]>();
     for (const { from_id, to_id } of edges) {
       let arr = out.get(from_id);
-      if (!arr) { arr = []; out.set(from_id, arr); }
+      if (!arr) {
+        arr = [];
+        out.set(from_id, arr);
+      }
       arr.push(to_id);
     }
     return out;
@@ -180,7 +188,8 @@ export function createDAG(
     // deno-lint-ignore no-explicit-any
     trx: Kysely<any> | Transaction<any>,
   ): Promise<Set<string>> {
-    const rows = await trx.selectFrom(nodesTable).select("id").execute() as NodeRow[];
+    const rows = await trx.selectFrom(nodesTable).select("id")
+      .execute() as NodeRow[];
     return new Set(rows.map((r) => r.id));
   }
 
@@ -312,7 +321,8 @@ export function createDAG(
 
   async function roots(): Promise<string[]> {
     // Roots are nodes that appear in no edge's to_id (nothing points to them)
-    const allNodes = await db.selectFrom(nodesTable).select("id").execute() as NodeRow[];
+    const allNodes = await db.selectFrom(nodesTable).select("id")
+      .execute() as NodeRow[];
     const nonRoots = await db
       .selectFrom(edgesTable)
       .select("to_id")
@@ -323,11 +333,15 @@ export function createDAG(
   }
 
   async function nodes(): Promise<string[]> {
-    const rows = await db.selectFrom(nodesTable).select("id").execute() as NodeRow[];
+    const rows = await db.selectFrom(nodesTable).select("id")
+      .execute() as NodeRow[];
     return rows.map((r) => r.id);
   }
 
-  async function traverse<C>(visitor: DAGVisitor<C>, context: C): Promise<void> {
+  async function traverse<C>(
+    visitor: DAGVisitor<C>,
+    context: C,
+  ): Promise<void> {
     const [outgoing, rootIds] = await Promise.all([
       loadOutgoing(db),
       roots(),

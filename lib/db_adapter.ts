@@ -45,11 +45,7 @@ import type {
   QueryResult,
 } from "kysely";
 
-import {
-  SqliteAdapter,
-  SqliteIntrospector,
-  SqliteQueryCompiler,
-} from "kysely";
+import { SqliteAdapter, SqliteIntrospector, SqliteQueryCompiler } from "kysely";
 
 // ---------------------------------------------------------------------------
 // Database interface shims
@@ -77,7 +73,9 @@ export interface JsrSqliteDatabase {
 export interface NodeSqliteDatabase {
   prepare(sql: string): {
     all(...params: unknown[]): Record<string, unknown>[];
-    run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+    run(
+      ...params: unknown[]
+    ): { changes: number; lastInsertRowid: number | bigint };
   };
   exec(sql: string): void;
   close(): void;
@@ -216,7 +214,10 @@ class DenoSqliteConnection implements DatabaseConnection {
       // node:sqlite: run() returns { changes, lastInsertRowid }
       const result = (this.#db as NodeSqliteDatabase)
         .prepare(sql)
-        .run(...params) as { changes: number; lastInsertRowid: number | bigint };
+        .run(...params) as {
+          changes: number;
+          lastInsertRowid: number | bigint;
+        };
       return {
         rows: [],
         numAffectedRows: BigInt(result.changes),
