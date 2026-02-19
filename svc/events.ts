@@ -1,14 +1,14 @@
-import { Branded, createError, ProgramId, Serializable } from "../lib/types";
+import { Branded, createError, Serializable } from "../lib/types";
 import { createDAG, DAGraph } from "@sha1n/dagraph";
 import { err, ok, Result } from "neverthrow";
 
-export const TxNotExistsError = createError<"TxNotExistsError", {}>(
+export const TxNotExistsError = createError<"TxNotExistsError">(
   "TxNotExistsError",
 );
-export const ConfigError = createError<"ConfigError", {}>(
+export const ConfigError = createError<"ConfigError">(
   "ConfigError",
 );
-export const TxExistsError = createError<"TxExistsError", {}>(
+export const TxExistsError = createError<"TxExistsError">(
   "TxExistsError",
 );
 

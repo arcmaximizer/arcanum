@@ -1,6 +1,6 @@
 import { Branded, createError, ProgramId, Serializable } from "./types";
 
-export const NetworkError = createError<"NetworkError", {}>("NetworkError");
+export const NetworkError = createError<"NetworkError">("NetworkError");
 
 export type NetworkResult = null | Message | NetworkError;
 

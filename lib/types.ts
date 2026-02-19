@@ -12,7 +12,7 @@ export class TaggedError<Tag extends string> extends Error {
   }
 }
 
-export function createError<Tag extends string, Props = {}>(tag: Tag) {
+export function createError<Tag extends string, Props = any>(tag: Tag) {
   return class extends TaggedError<Tag> {
     constructor(public readonly props: Props, message?: string) {
       super(tag, message);
