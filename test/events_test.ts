@@ -1,0 +1,303 @@
+import { Database } from "@db/sqlite";
+import { Kysely } from "kysely";
+import { assertEquals, assertExists, assertRejects } from "@std/assert";
+import {
+  TransactionLog,
+  createTxLogTables,
+  type Transaction,
+  type TransactionId,
+  type Event,
+  type EventId,
+  type ProgramHash,
+  type Input,
+  type StateDiff,
+} from "../svc/events.ts";
+import { DenoSqliteDialect } from "../lib/db_adapter.ts";
+
+function createTestDb(): Kysely<any> {
+  const db = new Database(":memory:");
+  return new Kysely<any>({
+    dialect: new DenoSqliteDialect({ database: db }),
+  });
+}
+
+function txId(id: string): TransactionId {
+  return id as TransactionId;
+}
+
+function eventId(id: string): EventId {
+  return id as EventId;
+}
+
+function progHash(s: string): ProgramHash {
+  return s as ProgramHash;
+}
+
+function createTestTx(id: string): Transaction {
+  return {
+    id: txId(id),
+    root: {
+      id: eventId(id),
+      from: progHash("program/a"),
+      to: progHash("program/b"),
+      content: { foo: "bar" },
+      timestamp: Date.now(),
+      children: [],
+    },
+    diffs: [{ id: `diff-${id}`, value: { key: "value" } }],
+    inputs: [{ callId: `call-${id}` as any, value: "input" }],
+    effects: [{
+      id: eventId(`effect-${id}`),
+      from: progHash("program/b"),
+      to: progHash("program/c"),
+      content: "effect",
+      timestamp: Date.now(),
+    }],
+  };
+}
+
+Deno.test("createTxLogTables creates all tables", async () => {
+  const db = createTestDb();
+  await createTxLogTables(db);
+
+  const tables = await db
+    .selectFrom("sqlite_master")
+    .select("name")
+    .where("type", "=", "table")
+    .where("name", "like", "txlog_%")
+    .execute();
+
+  const tableNames = new Set(tables.map((t) => t.name));
+  assertEquals(tableNames.has("txlog_edges"), true);
+  assertEquals(tableNames.has("txlog_events"), true);
+  assertEquals(tableNames.has("txlog_inputs"), true);
+  assertEquals(tableNames.has("txlog_nodes"), true);
+  assertEquals(tableNames.has("txlog_state_diffs"), true);
+  assertEquals(tableNames.has("txlog_effects"), true);
+  assertEquals(tableNames.has("txlog_transactions"), true);
+
+  await db.destroy();
+});
+
+Deno.test("TransactionLog.create initializes and returns instance", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  assertExists(log);
+  await db.destroy();
+});
+
+Deno.test("appendCurrent adds transaction and sets as current", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const tx = createTestTx("tx1");
+  await log.appendCurrent(tx);
+
+  const retrieved = await log.get(txId("tx1"));
+  assertExists(retrieved);
+  assertEquals(retrieved.id, txId("tx1"));
+
+  await db.destroy();
+});
+
+Deno.test("appendCurrent stores root event", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const tx = createTestTx("tx1");
+  await log.appendCurrent(tx);
+
+  const retrieved = await log.get(txId("tx1"));
+  assertExists(retrieved);
+  assertEquals(retrieved.root.from, progHash("program/a"));
+  assertEquals(retrieved.root.to, progHash("program/b"));
+
+  await db.destroy();
+});
+
+Deno.test("appendCurrent stores inputs", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const tx = createTestTx("tx1");
+  await log.appendCurrent(tx);
+
+  const retrieved = await log.get(txId("tx1"));
+  assertExists(retrieved);
+  assertEquals(retrieved.inputs.length, 1);
+  assertEquals(retrieved.inputs[0].callId, "call-tx1");
+
+  await db.destroy();
+});
+
+Deno.test("appendCurrent stores diffs", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const tx = createTestTx("tx1");
+  await log.appendCurrent(tx);
+
+  const retrieved = await log.get(txId("tx1"));
+  assertExists(retrieved);
+  assertEquals(retrieved.diffs.length, 1);
+  assertEquals(retrieved.diffs[0].id, "diff-tx1");
+
+  await db.destroy();
+});
+
+Deno.test("appendCurrent stores effects", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const tx = createTestTx("tx1");
+  await log.appendCurrent(tx);
+
+  const retrieved = await log.get(txId("tx1"));
+  assertExists(retrieved);
+  assertEquals(retrieved.effects.length, 1);
+  assertEquals(retrieved.effects[0].from, progHash("program/b"));
+
+  await db.destroy();
+});
+
+Deno.test("appendCurrent is idempotent", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const tx = createTestTx("tx1");
+  await log.appendCurrent(tx);
+  await log.appendCurrent(tx);
+
+  const all = await db.selectFrom("txlog_transactions").selectAll().execute();
+  assertEquals(all.length, 1);
+
+  await db.destroy();
+});
+
+Deno.test("appendTo adds transaction with dependency", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const tx1 = createTestTx("tx1");
+  await log.appendCurrent(tx1);
+
+  const tx2 = createTestTx("tx2");
+  const result = await log.appendTo(txId("tx1"), tx2);
+
+  assertEquals(result.isOk(), true);
+
+  const retrieved = await log.get(txId("tx2"));
+  assertExists(retrieved);
+
+  await db.destroy();
+});
+
+Deno.test("appendTo returns error for non-existent parent", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const tx = createTestTx("tx1");
+  const result = await log.appendTo(txId("nonexistent"), tx);
+
+  assertEquals(result.isErr(), true);
+
+  await db.destroy();
+});
+
+Deno.test("appendTo updates current if appending to current", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const tx1 = createTestTx("tx1");
+  await log.appendCurrent(tx1);
+
+  const tx2 = createTestTx("tx2");
+  await log.appendTo(txId("tx1"), tx2);
+
+  const retrieved = await log.get(txId("tx2"));
+  assertExists(retrieved);
+
+  await db.destroy();
+});
+
+Deno.test("get returns undefined for non-existent transaction", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const result = await log.get(txId("nonexistent"));
+
+  assertEquals(result, undefined);
+
+  await db.destroy();
+});
+
+Deno.test("rollbackTo sets current to previous transaction", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const tx1 = createTestTx("tx1");
+  await log.appendCurrent(tx1);
+
+  const tx2 = createTestTx("tx2");
+  await log.appendCurrent(tx2);
+
+  const result = await log.rollbackTo(txId("tx1"));
+  assertEquals(result.isOk(), true);
+
+  await db.destroy();
+});
+
+Deno.test("rollbackTo returns error for non-existent transaction", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const result = await log.rollbackTo(txId("nonexistent"));
+
+  assertEquals(result.isErr(), true);
+
+  await db.destroy();
+});
+
+Deno.test("stores event with children", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const tx: Transaction = {
+    id: txId("tx1"),
+    root: {
+      id: eventId("root1"),
+      from: progHash("program/a"),
+      to: progHash("program/b"),
+      content: {},
+      timestamp: Date.now(),
+      children: [
+        {
+          id: eventId("child1"),
+          from: progHash("program/b"),
+          to: progHash("program/c"),
+          content: {},
+          timestamp: Date.now(),
+        },
+        {
+          id: eventId("child2"),
+          from: progHash("program/b"),
+          to: progHash("program/d"),
+          content: {},
+          timestamp: Date.now(),
+        },
+      ],
+    },
+    diffs: [],
+    inputs: [],
+    effects: [],
+  };
+
+  await log.appendCurrent(tx);
+
+  const retrieved = await log.get(txId("tx1"));
+  assertExists(retrieved);
+  assertEquals(retrieved.root.children?.length, 2);
+
+  await db.destroy();
+});

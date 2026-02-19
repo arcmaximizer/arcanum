@@ -319,18 +319,18 @@ export class TransactionLog {
     const exists = await this.dag.getNode(tx.id);
     if (exists) return;
 
+    const hasCurrent = !!this.current;
+
     await this.insertTransaction(tx);
     await this.insertInputs(tx.inputs, tx.id);
     await this.insertDiffs(tx.diffs, tx.id);
     await this.insertEffects(tx.effects, tx.id);
 
-    if (this.current) {
+    if (hasCurrent && this.current) {
       await this.dag.addEdge(this.current, tx.id);
     } else {
       await this.dag.addNode(tx.id);
     }
-
-    this.current = tx.id;
   }
 
   async appendTo(
@@ -383,7 +383,18 @@ export class TransactionLog {
     if (txRows.length === 0) return undefined;
 
     const txRow = txRows[0] as any;
-    const root = await this.getEventWithChildren(txRow.id as EventId);
+
+    // Find root event: transaction_id = txId AND parent_event_id IS NULL
+    const rootRows = await this.db
+      .selectFrom(TXLOG_PREFIX + "_events")
+      .selectAll()
+      .where("transaction_id", "=", id)
+      .where("parent_event_id", "is", null)
+      .execute();
+
+    if (rootRows.length === 0) return undefined;
+
+    const root = await this.getEventWithChildren(rootRows[0].id as EventId);
 
     if (!root) return undefined;
 
