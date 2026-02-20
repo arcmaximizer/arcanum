@@ -150,11 +150,11 @@ export async function createTxLogTables(db: Kysely<any>): Promise<void> {
 }
 
 export interface SqliteTransactionLogOptions {
-  db: Kysely<any>;
+  db: Kysely<TxLogDb>;
 }
 
 export class TransactionLog {
-  private readonly db: Kysely<any>;
+  private readonly db: Kysely<TxLogDb>;
   private readonly dag: KyselyDAGraph;
   private current?: TransactionId;
 
@@ -184,8 +184,12 @@ export class TransactionLog {
     }
   }
 
+  private getDb(dbParam?: Kysely<any>): Kysely<any> {
+    return dbParam ?? this.db;
+  }
+
   private async insertTransaction(tx: Transaction, dbParam?: Kysely<any>): Promise<void> {
-    const qb = dbParam ?? this.db;
+    const qb = this.getDb(dbParam);
     const txId = tx.id;
     const isCurrent = this.current === undefined ? 1 : 0;
 
@@ -218,7 +222,7 @@ export class TransactionLog {
     parentEventId: EventId | null,
     dbParam?: Kysely<any>,
   ): Promise<void> {
-    const qb = dbParam ?? this.db;
+    const qb = this.getDb(dbParam);
     try {
       await qb
         .insertInto("txlog_events")
@@ -252,7 +256,7 @@ export class TransactionLog {
     transactionId: TransactionId,
     dbParam?: Kysely<any>,
   ): Promise<void> {
-    const qb = dbParam ?? this.db;
+    const qb = this.getDb(dbParam);
     for (const input of inputs) {
       try {
         await qb
@@ -278,7 +282,7 @@ export class TransactionLog {
     transactionId: TransactionId,
     dbParam?: Kysely<any>,
   ): Promise<void> {
-    const qb = dbParam ?? this.db;
+    const qb = this.getDb(dbParam);
     for (const diff of diffs) {
       try {
         await qb
@@ -303,7 +307,7 @@ export class TransactionLog {
     transactionId: TransactionId,
     dbParam?: Kysely<any>,
   ): Promise<void> {
-    const qb = dbParam ?? this.db;
+    const qb = this.getDb(dbParam);
     for (const effect of effects) {
       try {
         await qb
@@ -327,7 +331,7 @@ export class TransactionLog {
   }
 
   private async getEvent(eventId: EventId, dbParam?: Kysely<any>): Promise<Event | null> {
-    const qb = dbParam ?? this.db;
+    const qb = this.getDb(dbParam);
     const rows = await qb
       .selectFrom("txlog_events")
       .selectAll()
@@ -351,7 +355,7 @@ export class TransactionLog {
     const event = await this.getEvent(eventId, dbParam);
     if (!event) return null;
 
-    const qb = dbParam ?? this.db;
+    const qb = this.getDb(dbParam);
     const childrenRows = await qb
       .selectFrom("txlog_events")
       .selectAll()
@@ -369,7 +373,7 @@ export class TransactionLog {
   }
 
   private async getInputs(transactionId: TransactionId, dbParam?: Kysely<any>): Promise<Input[]> {
-    const qb = dbParam ?? this.db;
+    const qb = this.getDb(dbParam);
     const rows = await qb
       .selectFrom("txlog_inputs")
       .selectAll()
@@ -383,7 +387,7 @@ export class TransactionLog {
   }
 
   private async getDiffs(transactionId: TransactionId, dbParam?: Kysely<any>): Promise<StateDiff[]> {
-    const qb = dbParam ?? this.db;
+    const qb = this.getDb(dbParam);
     const rows = await qb
       .selectFrom("txlog_state_diffs")
       .selectAll()
@@ -452,7 +456,7 @@ export class TransactionLog {
       return err(new Error(`Transaction ${id} not found`));
     }
 
-    const qb = dbParam ?? this.db;
+    const qb = this.getDb(dbParam);
 
     if (this.current) {
       try {
@@ -487,7 +491,7 @@ export class TransactionLog {
   }
 
   async get(id: TransactionId, dbParam?: Kysely<any>): Promise<Transaction | undefined> {
-    const qb = dbParam ?? this.db;
+    const qb = this.getDb(dbParam);
     const txRows = await qb
       .selectFrom("txlog_transactions")
       .selectAll()
@@ -527,7 +531,7 @@ export class TransactionLog {
   }
 
   private async getEffects(transactionId: TransactionId, dbParam?: Kysely<any>): Promise<Event[]> {
-    const qb = dbParam ?? this.db;
+    const qb = this.getDb(dbParam);
     const rows = await qb
       .selectFrom("txlog_effects")
       .selectAll()
