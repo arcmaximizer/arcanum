@@ -184,11 +184,11 @@ export class TransactionLog {
     }
   }
 
-  private getDb(dbParam?: Kysely<any>): Kysely<any> {
+  private getDb(dbParam?: Kysely<TxLogDb>): Kysely<TxLogDb> {
     return dbParam ?? this.db;
   }
 
-  private async insertTransaction(tx: Transaction, dbParam?: Kysely<any>): Promise<void> {
+  private async insertTransaction(tx: Transaction, dbParam?: Kysely<TxLogDb>): Promise<void> {
     const qb = this.getDb(dbParam);
     const txId = tx.id;
     const isCurrent = this.current === undefined ? 1 : 0;
@@ -220,7 +220,7 @@ export class TransactionLog {
     event: Event,
     transactionId: TransactionId,
     parentEventId: EventId | null,
-    dbParam?: Kysely<any>,
+    dbParam?: Kysely<TxLogDb>,
   ): Promise<void> {
     const qb = this.getDb(dbParam);
     try {
@@ -254,7 +254,7 @@ export class TransactionLog {
   private async insertInputs(
     inputs: Input[],
     transactionId: TransactionId,
-    dbParam?: Kysely<any>,
+    dbParam?: Kysely<TxLogDb>,
   ): Promise<void> {
     const qb = this.getDb(dbParam);
     for (const input of inputs) {
@@ -280,7 +280,7 @@ export class TransactionLog {
   private async insertDiffs(
     diffs: StateDiff[],
     transactionId: TransactionId,
-    dbParam?: Kysely<any>,
+    dbParam?: Kysely<TxLogDb>,
   ): Promise<void> {
     const qb = this.getDb(dbParam);
     for (const diff of diffs) {
@@ -305,7 +305,7 @@ export class TransactionLog {
   private async insertEffects(
     effects: Event[],
     transactionId: TransactionId,
-    dbParam?: Kysely<any>,
+    dbParam?: Kysely<TxLogDb>,
   ): Promise<void> {
     const qb = this.getDb(dbParam);
     for (const effect of effects) {
@@ -330,7 +330,7 @@ export class TransactionLog {
     }
   }
 
-  private async getEvent(eventId: EventId, dbParam?: Kysely<any>): Promise<Event | null> {
+  private async getEvent(eventId: EventId, dbParam?: Kysely<TxLogDb>): Promise<Event | null> {
     const qb = this.getDb(dbParam);
     const rows = await qb
       .selectFrom("txlog_events")
@@ -351,7 +351,7 @@ export class TransactionLog {
     };
   }
 
-  private async getEventWithChildren(eventId: EventId, dbParam?: Kysely<any>): Promise<Event | null> {
+  private async getEventWithChildren(eventId: EventId, dbParam?: Kysely<TxLogDb>): Promise<Event | null> {
     const event = await this.getEvent(eventId, dbParam);
     if (!event) return null;
 
@@ -372,7 +372,7 @@ export class TransactionLog {
     return event;
   }
 
-  private async getInputs(transactionId: TransactionId, dbParam?: Kysely<any>): Promise<Input[]> {
+  private async getInputs(transactionId: TransactionId, dbParam?: Kysely<TxLogDb>): Promise<Input[]> {
     const qb = this.getDb(dbParam);
     const rows = await qb
       .selectFrom("txlog_inputs")
@@ -386,7 +386,7 @@ export class TransactionLog {
     }));
   }
 
-  private async getDiffs(transactionId: TransactionId, dbParam?: Kysely<any>): Promise<StateDiff[]> {
+  private async getDiffs(transactionId: TransactionId, dbParam?: Kysely<TxLogDb>): Promise<StateDiff[]> {
     const qb = this.getDb(dbParam);
     const rows = await qb
       .selectFrom("txlog_state_diffs")
@@ -400,7 +400,7 @@ export class TransactionLog {
     }));
   }
 
-  async appendCurrent(tx: Transaction, dbParam?: Kysely<any>): Promise<void> {
+  async appendCurrent(tx: Transaction, dbParam?: Kysely<TxLogDb>): Promise<void> {
     const exists = await this.dag.getNode(tx.id, dbParam);
     if (exists) {
       console.error(
@@ -426,7 +426,7 @@ export class TransactionLog {
   async appendTo(
     from: TransactionId,
     tx: Transaction,
-    dbParam?: Kysely<any>,
+    dbParam?: Kysely<TxLogDb>,
   ): Promise<Result<void, Error>> {
     const nodeExists = await this.dag.getNode(from, dbParam);
     if (!nodeExists) {
@@ -447,7 +447,7 @@ export class TransactionLog {
     return ok();
   }
 
-  async rollbackTo(id: TransactionId, dbParam?: Kysely<any>): Promise<Result<void, Error>> {
+  async rollbackTo(id: TransactionId, dbParam?: Kysely<TxLogDb>): Promise<Result<void, Error>> {
     const nodeExists = await this.dag.getNode(id, dbParam);
     if (!nodeExists) {
       console.error(
@@ -490,7 +490,7 @@ export class TransactionLog {
     return ok();
   }
 
-  async get(id: TransactionId, dbParam?: Kysely<any>): Promise<Transaction | undefined> {
+  async get(id: TransactionId, dbParam?: Kysely<TxLogDb>): Promise<Transaction | undefined> {
     const qb = this.getDb(dbParam);
     const txRows = await qb
       .selectFrom("txlog_transactions")
@@ -530,7 +530,7 @@ export class TransactionLog {
     };
   }
 
-  private async getEffects(transactionId: TransactionId, dbParam?: Kysely<any>): Promise<Event[]> {
+  private async getEffects(transactionId: TransactionId, dbParam?: Kysely<TxLogDb>): Promise<Event[]> {
     const qb = this.getDb(dbParam);
     const rows = await qb
       .selectFrom("txlog_effects")
