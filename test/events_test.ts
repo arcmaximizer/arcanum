@@ -1,5 +1,6 @@
 import { Database } from "@db/sqlite";
 import { Kysely } from "kysely";
+import { sql } from "kysely";
 import { assertEquals, assertExists, assertRejects } from "@std/assert";
 import {
   TransactionLog,
@@ -11,12 +12,13 @@ import {
   type ProgramHash,
   type Input,
   type StateDiff,
+  type TxLogDb,
 } from "../svc/events.ts";
 import { DenoSqliteDialect } from "../lib/db_adapter.ts";
 
-function createTestDb(): Kysely<any> {
+function createTestDb(): Kysely<TxLogDb> {
   const db = new Database(":memory:");
-  return new Kysely<any>({
+  return new Kysely<TxLogDb>({
     dialect: new DenoSqliteDialect({ database: db }),
   });
 }
@@ -60,21 +62,20 @@ Deno.test("createTxLogTables creates all tables", async () => {
   const db = createTestDb();
   await createTxLogTables(db);
 
-  const tables = await db
-    .selectFrom("sqlite_master")
-    .select("name")
-    .where("type", "=", "table")
-    .where("name", "like", "txlog_%")
-    .execute();
+  const expectedTables = [
+    "txlog_edges",
+    "txlog_events",
+    "txlog_inputs",
+    "txlog_nodes",
+    "txlog_state_diffs",
+    "txlog_effects",
+    "txlog_transactions",
+  ] as const;
 
-  const tableNames = new Set(tables.map((t) => t.name));
-  assertEquals(tableNames.has("txlog_edges"), true);
-  assertEquals(tableNames.has("txlog_events"), true);
-  assertEquals(tableNames.has("txlog_inputs"), true);
-  assertEquals(tableNames.has("txlog_nodes"), true);
-  assertEquals(tableNames.has("txlog_state_diffs"), true);
-  assertEquals(tableNames.has("txlog_effects"), true);
-  assertEquals(tableNames.has("txlog_transactions"), true);
+  for (const table of expectedTables) {
+    const rows = await (db as any).selectFrom(table).selectAll().execute();
+    assertEquals(Array.isArray(rows), true);
+  }
 
   await db.destroy();
 });
