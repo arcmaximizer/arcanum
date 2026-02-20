@@ -301,3 +301,38 @@ Deno.test("stores event with children", async () => {
 
   await db.destroy();
 });
+
+Deno.test("operations work with explicit db parameter", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  const tx = createTestTx("tx1");
+  await log.appendCurrent(tx, db);
+
+  const retrieved = await log.get(txId("tx1"), db);
+  assertExists(retrieved);
+  assertEquals(retrieved.id, txId("tx1"));
+
+  await db.destroy();
+});
+
+Deno.test("operations are atomic when using db.transaction()", async () => {
+  const db = createTestDb();
+  const log = await TransactionLog.create({ db });
+
+  await db.transaction().execute(async (trx) => {
+    const tx1 = createTestTx("tx1");
+    await log.appendCurrent(tx1, trx);
+
+    const tx2 = createTestTx("tx2");
+    await log.appendCurrent(tx2, trx);
+  });
+
+  const tx1 = await log.get(txId("tx1"));
+  const tx2 = await log.get(txId("tx2"));
+  assertExists(tx1);
+  assertExists(tx2);
+
+  await db.destroy();
+});
+

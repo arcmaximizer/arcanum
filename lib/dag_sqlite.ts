@@ -64,29 +64,29 @@ export type DAGVisitor<C> = (
 
 export interface KyselyDAGraph {
   /** Add a node by id. No-op if it already exists. */
-  addNode(id: string): Promise<void>;
+  addNode(id: string, db?: Kysely<any>): Promise<void>;
 
   /** Returns true if a node with this id exists in the graph. */
-  getNode(id: string): Promise<boolean>;
+  getNode(id: string, db?: Kysely<any>): Promise<boolean>;
 
   /**
    * Add a directed edge from → to (meaning `to` depends on `from`).
    * Throws if the edge would create a cycle.
    * Both nodes are auto-created if they don't exist.
    */
-  addEdge(from: string, to: string): Promise<void>;
+  addEdge(from: string, to: string, db?: Kysely<any>): Promise<void>;
 
   /**
    * Returns all node ids in topological order (depth-first, dependencies first).
    * Equivalent to: for every node, all its transitive dependencies appear before it.
    */
-  topologicalSort(): Promise<string[]>;
+  topologicalSort(db?: Kysely<any>): Promise<string[]>;
 
   /** Returns the root node ids (nodes with no dependencies / in-edges to them as dependents). */
-  roots(): Promise<string[]>;
+  roots(db?: Kysely<any>): Promise<string[]>;
 
   /** Returns all node ids in the graph. */
-  nodes(): Promise<string[]>;
+  nodes(db?: Kysely<any>): Promise<string[]>;
 
   /**
    * Traverses the graph depth-first from each root, calling visitor for every node.
@@ -94,7 +94,7 @@ export interface KyselyDAGraph {
    * Behaves like a tree expansion: if a node is reachable via multiple paths it
    * will be visited multiple times — once per path, just like the original implementation.
    */
-  traverse<C>(visitor: DAGVisitor<C>, context: C): Promise<void>;
+  traverse<C>(visitor: DAGVisitor<C>, context: C, db?: Kysely<any>): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -265,16 +265,18 @@ export function createDAG(
   // Implementation
   // ------------------------------------------------------------------
 
-  async function addNode(id: string): Promise<void> {
-    await db
+  async function addNode(id: string, dbParam?: Kysely<any>): Promise<void> {
+    const qb = dbParam ?? db;
+    await qb
       .insertInto(nodesTable)
       .values({ id } as NodeRow)
       .onConflict((oc) => oc.column("id").doNothing())
       .execute();
   }
 
-  async function getNode(id: string): Promise<boolean> {
-    const row = await db
+  async function getNode(id: string, dbParam?: Kysely<any>): Promise<boolean> {
+    const qb = dbParam ?? db;
+    const row = await qb
       .selectFrom(nodesTable)
       .select("id")
       .where("id", "=", id)
@@ -282,25 +284,28 @@ export function createDAG(
     return row !== undefined;
   }
 
-  async function addEdge(from: string, to: string): Promise<void> {
-    await db.transaction().execute(async (trx) => {
-      // Auto-create nodes
-      await trx
+  async function addEdge(from: string, to: string, dbParam?: Kysely<any>): Promise<void> {
+    const qb = dbParam ?? db;
+    
+    // If a dbParam was provided (different from default db), assume caller is managing transaction
+    const shouldWrapInTransaction = dbParam === undefined;
+    
+    if (!shouldWrapInTransaction) {
+      // Caller provided custom db/transaction, use directly without wrapping
+      await qb
         .insertInto(nodesTable)
         .values([{ id: from }, { id: to }] as NodeRow[])
-        .onConflict((oc) => oc.column("id").doNothing())
+        .onConflict((oc: any) => oc.column("id").doNothing())
         .execute();
 
-      // Insert edge
-      await trx
+      await qb
         .insertInto(edgesTable)
         .values({ from_id: from, to_id: to } as EdgeRow)
-        .onConflict((oc) => oc.columns(["from_id", "to_id"]).doNothing())
+        .onConflict((oc: any) => oc.columns(["from_id", "to_id"]).doNothing())
         .execute();
 
-      // Cycle check — load full graph and run Kahn's
-      const nodeIds = await loadNodeIds(trx);
-      const outgoing = await loadOutgoing(trx);
+      const nodeIds = await loadNodeIds(qb);
+      const outgoing = await loadOutgoing(qb);
       const sorted = topoSort(nodeIds, outgoing);
 
       if (sorted === null) {
@@ -308,22 +313,47 @@ export function createDAG(
           `Adding edge [${from}] -> [${to}] would create a cycle`,
         );
       }
-    });
+    } else {
+      await qb.transaction().execute(async (trx) => {
+        await trx
+          .insertInto(nodesTable)
+          .values([{ id: from }, { id: to }] as NodeRow[])
+          .onConflict((oc: any) => oc.column("id").doNothing())
+          .execute();
+
+        await trx
+          .insertInto(edgesTable)
+          .values({ from_id: from, to_id: to } as EdgeRow)
+          .onConflict((oc: any) => oc.columns(["from_id", "to_id"]).doNothing())
+          .execute();
+
+        const nodeIds = await loadNodeIds(trx);
+        const outgoing = await loadOutgoing(trx);
+        const sorted = topoSort(nodeIds, outgoing);
+
+        if (sorted === null) {
+          throw new Error(
+            `Adding edge [${from}] -> [${to}] would create a cycle`,
+          );
+        }
+      });
+    }
   }
 
-  async function topologicalSort(): Promise<string[]> {
+  async function topologicalSort(dbParam?: Kysely<any>): Promise<string[]> {
+    const qb = dbParam ?? db;
     const [nodeIds, outgoing] = await Promise.all([
-      loadNodeIds(db),
-      loadOutgoing(db),
+      loadNodeIds(qb),
+      loadOutgoing(qb),
     ]);
     return dfsTopoSort(nodeIds, outgoing);
   }
 
-  async function roots(): Promise<string[]> {
-    // Roots are nodes that appear in no edge's to_id (nothing points to them)
-    const allNodes = await db.selectFrom(nodesTable).select("id")
+  async function roots(dbParam?: Kysely<any>): Promise<string[]> {
+    const qb = dbParam ?? db;
+    const allNodes = await qb.selectFrom(nodesTable).select("id")
       .execute() as NodeRow[];
-    const nonRoots = await db
+    const nonRoots = await qb
       .selectFrom(edgesTable)
       .select("to_id")
       .execute() as { to_id: string }[];
@@ -332,8 +362,9 @@ export function createDAG(
     return allNodes.map((r) => r.id).filter((id) => !nonRootSet.has(id));
   }
 
-  async function nodes(): Promise<string[]> {
-    const rows = await db.selectFrom(nodesTable).select("id")
+  async function nodes(dbParam?: Kysely<any>): Promise<string[]> {
+    const qb = dbParam ?? db;
+    const rows = await qb.selectFrom(nodesTable).select("id")
       .execute() as NodeRow[];
     return rows.map((r) => r.id);
   }
@@ -341,10 +372,12 @@ export function createDAG(
   async function traverse<C>(
     visitor: DAGVisitor<C>,
     context: C,
+    dbParam?: Kysely<any>,
   ): Promise<void> {
+    const qb = dbParam ?? db;
     const [outgoing, rootIds] = await Promise.all([
-      loadOutgoing(db),
-      roots(),
+      loadOutgoing(qb),
+      roots(qb),
     ]);
 
     function visitNode(

@@ -149,11 +149,12 @@ export class TransactionLog {
     }
   }
 
-  private async insertTransaction(tx: Transaction): Promise<void> {
+  private async insertTransaction(tx: Transaction, dbParam?: Kysely<any>): Promise<void> {
+    const qb = dbParam ?? this.db;
     const txId = tx.id;
     const isCurrent = this.current === undefined ? 1 : 0;
 
-    await this.db
+    await qb
       .insertInto(TXLOG_PREFIX + "_transactions")
       .values({
         id: txId,
@@ -167,15 +168,17 @@ export class TransactionLog {
       this.current = txId;
     }
 
-    await this.insertEvent(tx.root, txId, null);
+    await this.insertEvent(tx.root, txId, null, dbParam);
   }
 
   private async insertEvent(
     event: Event,
     transactionId: TransactionId,
     parentEventId: EventId | null,
+    dbParam?: Kysely<any>,
   ): Promise<void> {
-    await this.db
+    const qb = dbParam ?? this.db;
+    await qb
       .insertInto(TXLOG_PREFIX + "_events")
       .values({
         id: event.id,
@@ -192,7 +195,7 @@ export class TransactionLog {
 
     if (event.children) {
       for (const child of event.children) {
-        await this.insertEvent(child, transactionId, event.id);
+        await this.insertEvent(child, transactionId, event.id, dbParam);
       }
     }
   }
@@ -200,9 +203,11 @@ export class TransactionLog {
   private async insertInputs(
     inputs: Input[],
     transactionId: TransactionId,
+    dbParam?: Kysely<any>,
   ): Promise<void> {
+    const qb = dbParam ?? this.db;
     for (const input of inputs) {
-      await this.db
+      await qb
         .insertInto(TXLOG_PREFIX + "_inputs")
         .values({
           id: crypto.randomUUID(),
@@ -217,9 +222,11 @@ export class TransactionLog {
   private async insertDiffs(
     diffs: StateDiff[],
     transactionId: TransactionId,
+    dbParam?: Kysely<any>,
   ): Promise<void> {
+    const qb = dbParam ?? this.db;
     for (const diff of diffs) {
-      await this.db
+      await qb
         .insertInto(TXLOG_PREFIX + "_state_diffs")
         .values({
           id: diff.id,
@@ -233,9 +240,11 @@ export class TransactionLog {
   private async insertEffects(
     effects: Event[],
     transactionId: TransactionId,
+    dbParam?: Kysely<any>,
   ): Promise<void> {
+    const qb = dbParam ?? this.db;
     for (const effect of effects) {
-      await this.db
+      await qb
         .insertInto(TXLOG_PREFIX + "_effects")
         .values({
           id: effect.id,
@@ -249,8 +258,9 @@ export class TransactionLog {
     }
   }
 
-  private async getEvent(eventId: EventId): Promise<Event | null> {
-    const rows = await this.db
+  private async getEvent(eventId: EventId, dbParam?: Kysely<any>): Promise<Event | null> {
+    const qb = dbParam ?? this.db;
+    const rows = await qb
       .selectFrom(TXLOG_PREFIX + "_events")
       .selectAll()
       .where("id", "=", eventId)
@@ -269,11 +279,12 @@ export class TransactionLog {
     };
   }
 
-  private async getEventWithChildren(eventId: EventId): Promise<Event | null> {
-    const event = await this.getEvent(eventId);
+  private async getEventWithChildren(eventId: EventId, dbParam?: Kysely<any>): Promise<Event | null> {
+    const event = await this.getEvent(eventId, dbParam);
     if (!event) return null;
 
-    const childrenRows = await this.db
+    const qb = dbParam ?? this.db;
+    const childrenRows = await qb
       .selectFrom(TXLOG_PREFIX + "_events")
       .selectAll()
       .where("parent_event_id", "=", eventId)
@@ -281,7 +292,7 @@ export class TransactionLog {
 
     const children: Event[] = [];
     for (const childRow of childrenRows as any[]) {
-      const child = await this.getEventWithChildren(childRow.id);
+      const child = await this.getEventWithChildren(childRow.id, dbParam);
       if (child) children.push(child);
     }
 
@@ -289,8 +300,9 @@ export class TransactionLog {
     return event;
   }
 
-  private async getInputs(transactionId: TransactionId): Promise<Input[]> {
-    const rows = await this.db
+  private async getInputs(transactionId: TransactionId, dbParam?: Kysely<any>): Promise<Input[]> {
+    const qb = dbParam ?? this.db;
+    const rows = await qb
       .selectFrom(TXLOG_PREFIX + "_inputs")
       .selectAll()
       .where("transaction_id", "=", transactionId)
@@ -302,8 +314,9 @@ export class TransactionLog {
     }));
   }
 
-  private async getDiffs(transactionId: TransactionId): Promise<StateDiff[]> {
-    const rows = await this.db
+  private async getDiffs(transactionId: TransactionId, dbParam?: Kysely<any>): Promise<StateDiff[]> {
+    const qb = dbParam ?? this.db;
+    const rows = await qb
       .selectFrom(TXLOG_PREFIX + "_state_diffs")
       .selectAll()
       .where("transaction_id", "=", transactionId)
@@ -315,48 +328,50 @@ export class TransactionLog {
     }));
   }
 
-  async appendCurrent(tx: Transaction): Promise<void> {
-    const exists = await this.dag.getNode(tx.id);
+  async appendCurrent(tx: Transaction, dbParam?: Kysely<any>): Promise<void> {
+    const exists = await this.dag.getNode(tx.id, dbParam);
     if (exists) return;
 
     const hasCurrent = !!this.current;
 
-    await this.insertTransaction(tx);
-    await this.insertInputs(tx.inputs, tx.id);
-    await this.insertDiffs(tx.diffs, tx.id);
-    await this.insertEffects(tx.effects, tx.id);
+    await this.insertTransaction(tx, dbParam);
+    await this.insertInputs(tx.inputs, tx.id, dbParam);
+    await this.insertDiffs(tx.diffs, tx.id, dbParam);
+    await this.insertEffects(tx.effects, tx.id, dbParam);
 
     if (hasCurrent && this.current) {
-      await this.dag.addEdge(this.current, tx.id);
+      await this.dag.addEdge(this.current, tx.id, dbParam);
     } else {
-      await this.dag.addNode(tx.id);
+      await this.dag.addNode(tx.id, dbParam);
     }
   }
 
   async appendTo(
     from: TransactionId,
     tx: Transaction,
+    dbParam?: Kysely<any>,
   ): Promise<Result<void, Error>> {
-    const nodeExists = await this.dag.getNode(from);
+    const nodeExists = await this.dag.getNode(from, dbParam);
     if (!nodeExists) return err(new Error("Transaction not found"));
 
-    await this.insertTransaction(tx);
-    await this.insertInputs(tx.inputs, tx.id);
-    await this.insertDiffs(tx.diffs, tx.id);
-    await this.insertEffects(tx.effects, tx.id);
+    await this.insertTransaction(tx, dbParam);
+    await this.insertInputs(tx.inputs, tx.id, dbParam);
+    await this.insertDiffs(tx.diffs, tx.id, dbParam);
+    await this.insertEffects(tx.effects, tx.id, dbParam);
 
-    await this.dag.addEdge(from, tx.id);
+    await this.dag.addEdge(from, tx.id, dbParam);
 
     if (from === this.current) this.current = tx.id;
     return ok();
   }
 
-  async rollbackTo(id: TransactionId): Promise<Result<void, Error>> {
-    const nodeExists = await this.dag.getNode(id);
+  async rollbackTo(id: TransactionId, dbParam?: Kysely<any>): Promise<Result<void, Error>> {
+    const qb = dbParam ?? this.db;
+    const nodeExists = await this.dag.getNode(id, dbParam);
     if (!nodeExists) return err(new Error("Transaction not found"));
 
     if (this.current) {
-      await this.db
+      await qb
         .updateTable(TXLOG_PREFIX + "_transactions")
         .set({ is_current: 0 })
         .where("id", "=", this.current)
@@ -373,8 +388,9 @@ export class TransactionLog {
     return ok();
   }
 
-  async get(id: TransactionId): Promise<Transaction | undefined> {
-    const txRows = await this.db
+  async get(id: TransactionId, dbParam?: Kysely<any>): Promise<Transaction | undefined> {
+    const qb = dbParam ?? this.db;
+    const txRows = await qb
       .selectFrom(TXLOG_PREFIX + "_transactions")
       .selectAll()
       .where("id", "=", id)
@@ -385,7 +401,7 @@ export class TransactionLog {
     const txRow = txRows[0] as any;
 
     // Find root event: transaction_id = txId AND parent_event_id IS NULL
-    const rootRows = await this.db
+    const rootRows = await qb
       .selectFrom(TXLOG_PREFIX + "_events")
       .selectAll()
       .where("transaction_id", "=", id)
@@ -394,14 +410,14 @@ export class TransactionLog {
 
     if (rootRows.length === 0) return undefined;
 
-    const root = await this.getEventWithChildren(rootRows[0].id as EventId);
+    const root = await this.getEventWithChildren(rootRows[0].id as EventId, dbParam);
 
     if (!root) return undefined;
 
     const [inputs, diffs, effects] = await Promise.all([
-      this.getInputs(id),
-      this.getDiffs(id),
-      this.getEffects(id),
+      this.getInputs(id, dbParam),
+      this.getDiffs(id, dbParam),
+      this.getEffects(id, dbParam),
     ]);
 
     return {
@@ -413,8 +429,9 @@ export class TransactionLog {
     };
   }
 
-  private async getEffects(transactionId: TransactionId): Promise<Event[]> {
-    const rows = await this.db
+  private async getEffects(transactionId: TransactionId, dbParam?: Kysely<any>): Promise<Event[]> {
+    const qb = dbParam ?? this.db;
+    const rows = await qb
       .selectFrom(TXLOG_PREFIX + "_effects")
       .selectAll()
       .where("transaction_id", "=", transactionId)
