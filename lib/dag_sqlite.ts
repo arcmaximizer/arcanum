@@ -94,7 +94,11 @@ export interface KyselyDAGraph {
    * Behaves like a tree expansion: if a node is reachable via multiple paths it
    * will be visited multiple times — once per path, just like the original implementation.
    */
-  traverse<C>(visitor: DAGVisitor<C>, context: C, db?: Kysely<any>): Promise<void>;
+  traverse<C>(
+    visitor: DAGVisitor<C>,
+    context: C,
+    db?: Kysely<any>,
+  ): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -284,12 +288,16 @@ export function createDAG(
     return row !== undefined;
   }
 
-  async function addEdge(from: string, to: string, dbParam?: Kysely<any>): Promise<void> {
+  async function addEdge(
+    from: string,
+    to: string,
+    dbParam?: Kysely<any>,
+  ): Promise<void> {
     const qb = dbParam ?? db;
-    
+
     // If a dbParam was provided (different from default db), assume caller is managing transaction
     const shouldWrapInTransaction = dbParam === undefined;
-    
+
     if (!shouldWrapInTransaction) {
       // Caller provided custom db/transaction, use directly without wrapping
       await qb

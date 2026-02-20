@@ -188,7 +188,10 @@ export class TransactionLog {
     return dbParam ?? this.db;
   }
 
-  private async insertTransaction(tx: Transaction, dbParam?: Kysely<TxLogDb>): Promise<void> {
+  private async insertTransaction(
+    tx: Transaction,
+    dbParam?: Kysely<TxLogDb>,
+  ): Promise<void> {
     const qb = this.getDb(dbParam);
     const txId = tx.id;
     const isCurrent = this.current === undefined ? 1 : 0;
@@ -204,7 +207,9 @@ export class TransactionLog {
         .execute();
     } catch (e) {
       console.error(
-        `CRITICAL: Failed to insert transaction ${txId} - ${e instanceof Error ? e.message : "unknown error"}`,
+        `CRITICAL: Failed to insert transaction ${txId} - ${
+          e instanceof Error ? e.message : "unknown error"
+        }`,
       );
       throw new Error(`Transaction insert failed for ${txId}`);
     }
@@ -239,7 +244,9 @@ export class TransactionLog {
         .execute();
     } catch (e) {
       console.error(
-        `CRITICAL: Failed to insert event ${event.id} - ${e instanceof Error ? e.message : "unknown error"}`,
+        `CRITICAL: Failed to insert event ${event.id} - ${
+          e instanceof Error ? e.message : "unknown error"
+        }`,
       );
       throw e;
     }
@@ -270,7 +277,9 @@ export class TransactionLog {
           .execute();
       } catch (e) {
         console.error(
-          `CRITICAL: Failed to insert input for transaction ${transactionId} - ${e instanceof Error ? e.message : "unknown error"}`,
+          `CRITICAL: Failed to insert input for transaction ${transactionId} - ${
+            e instanceof Error ? e.message : "unknown error"
+          }`,
         );
         throw e;
       }
@@ -295,7 +304,9 @@ export class TransactionLog {
           .execute();
       } catch (e) {
         console.error(
-          `CRITICAL: Failed to insert state diff ${diff.id} - ${e instanceof Error ? e.message : "unknown error"}`,
+          `CRITICAL: Failed to insert state diff ${diff.id} - ${
+            e instanceof Error ? e.message : "unknown error"
+          }`,
         );
         throw e;
       }
@@ -323,14 +334,19 @@ export class TransactionLog {
           .execute();
       } catch (e) {
         console.error(
-          `CRITICAL: Failed to insert effect ${effect.id} - ${e instanceof Error ? e.message : "unknown error"}`,
+          `CRITICAL: Failed to insert effect ${effect.id} - ${
+            e instanceof Error ? e.message : "unknown error"
+          }`,
         );
         throw e;
       }
     }
   }
 
-  private async getEvent(eventId: EventId, dbParam?: Kysely<TxLogDb>): Promise<Event | null> {
+  private async getEvent(
+    eventId: EventId,
+    dbParam?: Kysely<TxLogDb>,
+  ): Promise<Event | null> {
     const qb = this.getDb(dbParam);
     const rows = await qb
       .selectFrom("txlog_events")
@@ -351,7 +367,10 @@ export class TransactionLog {
     };
   }
 
-  private async getEventWithChildren(eventId: EventId, dbParam?: Kysely<TxLogDb>): Promise<Event | null> {
+  private async getEventWithChildren(
+    eventId: EventId,
+    dbParam?: Kysely<TxLogDb>,
+  ): Promise<Event | null> {
     const event = await this.getEvent(eventId, dbParam);
     if (!event) return null;
 
@@ -364,7 +383,10 @@ export class TransactionLog {
 
     const children: Event[] = [];
     for (const childRow of childrenRows as TxLogEvent[]) {
-      const child = await this.getEventWithChildren(childRow.id as EventId, dbParam);
+      const child = await this.getEventWithChildren(
+        childRow.id as EventId,
+        dbParam,
+      );
       if (child) children.push(child);
     }
 
@@ -372,7 +394,10 @@ export class TransactionLog {
     return event;
   }
 
-  private async getInputs(transactionId: TransactionId, dbParam?: Kysely<TxLogDb>): Promise<Input[]> {
+  private async getInputs(
+    transactionId: TransactionId,
+    dbParam?: Kysely<TxLogDb>,
+  ): Promise<Input[]> {
     const qb = this.getDb(dbParam);
     const rows = await qb
       .selectFrom("txlog_inputs")
@@ -386,7 +411,10 @@ export class TransactionLog {
     }));
   }
 
-  private async getDiffs(transactionId: TransactionId, dbParam?: Kysely<TxLogDb>): Promise<StateDiff[]> {
+  private async getDiffs(
+    transactionId: TransactionId,
+    dbParam?: Kysely<TxLogDb>,
+  ): Promise<StateDiff[]> {
     const qb = this.getDb(dbParam);
     const rows = await qb
       .selectFrom("txlog_state_diffs")
@@ -400,7 +428,10 @@ export class TransactionLog {
     }));
   }
 
-  async appendCurrent(tx: Transaction, dbParam?: Kysely<TxLogDb>): Promise<void> {
+  async appendCurrent(
+    tx: Transaction,
+    dbParam?: Kysely<TxLogDb>,
+  ): Promise<void> {
     const exists = await this.dag.getNode(tx.id, dbParam);
     if (exists) {
       console.error(
@@ -447,7 +478,10 @@ export class TransactionLog {
     return ok();
   }
 
-  async rollbackTo(id: TransactionId, dbParam?: Kysely<TxLogDb>): Promise<Result<void, Error>> {
+  async rollbackTo(
+    id: TransactionId,
+    dbParam?: Kysely<TxLogDb>,
+  ): Promise<Result<void, Error>> {
     const nodeExists = await this.dag.getNode(id, dbParam);
     if (!nodeExists) {
       console.error(
@@ -467,7 +501,9 @@ export class TransactionLog {
           .execute();
       } catch (e) {
         console.error(
-          `CRITICAL: Failed to unset current transaction ${this.current} - ${e instanceof Error ? e.message : "unknown error"}`,
+          `CRITICAL: Failed to unset current transaction ${this.current} - ${
+            e instanceof Error ? e.message : "unknown error"
+          }`,
         );
         throw e;
       }
@@ -481,7 +517,9 @@ export class TransactionLog {
         .execute();
     } catch (e) {
       console.error(
-        `CRITICAL: Failed to set current transaction to ${id} - ${e instanceof Error ? e.message : "unknown error"}`,
+        `CRITICAL: Failed to set current transaction to ${id} - ${
+          e instanceof Error ? e.message : "unknown error"
+        }`,
       );
       throw e;
     }
@@ -490,7 +528,10 @@ export class TransactionLog {
     return ok();
   }
 
-  async get(id: TransactionId, dbParam?: Kysely<TxLogDb>): Promise<Transaction | undefined> {
+  async get(
+    id: TransactionId,
+    dbParam?: Kysely<TxLogDb>,
+  ): Promise<Transaction | undefined> {
     const qb = this.getDb(dbParam);
     const txRows = await qb
       .selectFrom("txlog_transactions")
@@ -511,7 +552,10 @@ export class TransactionLog {
 
     if (rootRows.length === 0) return undefined;
 
-    const root = await this.getEventWithChildren(rootRows[0].id as EventId, dbParam);
+    const root = await this.getEventWithChildren(
+      rootRows[0].id as EventId,
+      dbParam,
+    );
 
     if (!root) return undefined;
 
@@ -530,7 +574,10 @@ export class TransactionLog {
     };
   }
 
-  private async getEffects(transactionId: TransactionId, dbParam?: Kysely<TxLogDb>): Promise<Event[]> {
+  private async getEffects(
+    transactionId: TransactionId,
+    dbParam?: Kysely<TxLogDb>,
+  ): Promise<Event[]> {
     const qb = this.getDb(dbParam);
     const rows = await qb
       .selectFrom("txlog_effects")

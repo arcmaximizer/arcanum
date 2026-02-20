@@ -3,15 +3,15 @@ import { Kysely } from "kysely";
 import { sql } from "kysely";
 import { assertEquals, assertExists, assertRejects } from "@std/assert";
 import {
-  TransactionLog,
   createTxLogTables,
-  type Transaction,
-  type TransactionId,
   type Event,
   type EventId,
-  type ProgramHash,
   type Input,
+  type ProgramHash,
   type StateDiff,
+  type Transaction,
+  type TransactionId,
+  TransactionLog,
   type TxLogDb,
 } from "../svc/events.ts";
 import { DenoSqliteDialect } from "../lib/db_adapter.ts";
@@ -342,4 +342,3 @@ Deno.test("operations are atomic when using db.transaction()", async () => {
 
   await db.destroy();
 });
-
