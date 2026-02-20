@@ -1,18 +1,17 @@
-import { Branded, createError, ProgramId, Serializable } from "./types";
+import { Branded, ProgramId, Serializable } from "./types.ts";
+import { err, ok, Result, ResultAsync } from "neverthrow";
 
-export const NetworkError = createError<"NetworkError">("NetworkError");
-
-export type NetworkResult = null | Message | NetworkError;
+export class NetworkError extends Error {}
 
 export interface NetworkService {
-  send(message: Message): Promise<NetworkResult>;
+  send(message: Message): ResultAsync<Message | undefined, NetworkError>;
   send(
     from: ProgramId,
     to: ReceiverId,
     content: Serializable | string | Uint8Array,
     extraData?: Serializable,
     replyTo?: number,
-  ): Promise<NetworkResult>;
+  ): ResultAsync<Message | undefined, NetworkError>;
 }
 
 export interface Message {

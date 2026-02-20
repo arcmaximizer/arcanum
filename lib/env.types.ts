@@ -1,4 +1,4 @@
-import { Serializable } from "./types";
+import { Serializable } from "./types.ts";
 
 export interface ExecutionContext {
   setTimer(data: Serializable, scheduledTime: number | Date): Promise<number>;
