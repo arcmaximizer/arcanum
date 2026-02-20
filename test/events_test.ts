@@ -161,13 +161,19 @@ Deno.test("appendCurrent stores effects", async () => {
   await db.destroy();
 });
 
-Deno.test("appendCurrent is idempotent", async () => {
+Deno.test("appendCurrent throws on duplicate transaction", async () => {
   const db = createTestDb();
   const log = await TransactionLog.create({ db });
 
   const tx = createTestTx("tx1");
   await log.appendCurrent(tx);
-  await log.appendCurrent(tx);
+
+  try {
+    await log.appendCurrent(tx);
+    throw new Error("Should have thrown");
+  } catch (e) {
+    assertEquals(e instanceof Error, true);
+  }
 
   const all = await db.selectFrom("txlog_transactions").selectAll().execute();
   assertEquals(all.length, 1);

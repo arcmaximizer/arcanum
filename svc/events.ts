@@ -44,13 +44,58 @@ export interface Transaction {
   effects: Event[];
 }
 
-const TXLOG_PREFIX = "txlog";
+export interface TxLogDb {
+  txlog_transactions: TxLogTransaction;
+  txlog_events: TxLogEvent;
+  txlog_inputs: TxLogInput;
+  txlog_state_diffs: TxLogStateDiff;
+  txlog_effects: TxLogEffect;
+}
+
+export interface TxLogTransaction {
+  id: string;
+  is_current: number;
+  created_at: number;
+}
+
+export interface TxLogEvent {
+  id: string;
+  from_program: string;
+  to_program: string;
+  content: string;
+  timestamp: number;
+  parent_event_id: string | null;
+  transaction_id: string;
+  is_effect: number;
+}
+
+export interface TxLogInput {
+  id: string;
+  call_id: string;
+  value: string;
+  transaction_id: string;
+}
+
+export interface TxLogStateDiff {
+  id: string;
+  value: string;
+  transaction_id: string;
+}
+
+export interface TxLogEffect {
+  id: string;
+  from_program: string;
+  to_program: string;
+  content: string;
+  timestamp: number;
+  transaction_id: string;
+}
 
 export async function createTxLogTables(db: Kysely<any>): Promise<void> {
-  await createDAGTables(db, TXLOG_PREFIX);
+  await createDAGTables(db, "txlog");
 
   await sql`
-    CREATE TABLE IF NOT EXISTS ${sql.id(TXLOG_PREFIX + "_transactions")} (
+    CREATE TABLE IF NOT EXISTS txlog_transactions (
       id TEXT NOT NULL PRIMARY KEY,
       is_current INTEGER DEFAULT 0,
       created_at INTEGER NOT NULL
@@ -58,7 +103,7 @@ export async function createTxLogTables(db: Kysely<any>): Promise<void> {
   `.execute(db);
 
   await sql`
-    CREATE TABLE IF NOT EXISTS ${sql.id(TXLOG_PREFIX + "_events")} (
+    CREATE TABLE IF NOT EXISTS txlog_events (
       id TEXT NOT NULL PRIMARY KEY,
       from_program TEXT NOT NULL,
       to_program TEXT NOT NULL,
@@ -67,49 +112,39 @@ export async function createTxLogTables(db: Kysely<any>): Promise<void> {
       parent_event_id TEXT,
       transaction_id TEXT NOT NULL,
       is_effect INTEGER DEFAULT 0,
-      FOREIGN KEY (transaction_id) REFERENCES ${
-    sql.id(TXLOG_PREFIX + "_transactions")
-  } (id),
-      FOREIGN KEY (parent_event_id) REFERENCES ${
-    sql.id(TXLOG_PREFIX + "_events")
-  } (id)
+      FOREIGN KEY (transaction_id) REFERENCES txlog_transactions (id),
+      FOREIGN KEY (parent_event_id) REFERENCES txlog_events (id)
     )
   `.execute(db);
 
   await sql`
-    CREATE TABLE IF NOT EXISTS ${sql.id(TXLOG_PREFIX + "_inputs")} (
+    CREATE TABLE IF NOT EXISTS txlog_inputs (
       id TEXT NOT NULL PRIMARY KEY,
       call_id TEXT NOT NULL,
       value TEXT NOT NULL,
       transaction_id TEXT NOT NULL,
-      FOREIGN KEY (transaction_id) REFERENCES ${
-    sql.id(TXLOG_PREFIX + "_transactions")
-  } (id)
+      FOREIGN KEY (transaction_id) REFERENCES txlog_transactions (id)
     )
   `.execute(db);
 
   await sql`
-    CREATE TABLE IF NOT EXISTS ${sql.id(TXLOG_PREFIX + "_state_diffs")} (
+    CREATE TABLE IF NOT EXISTS txlog_state_diffs (
       id TEXT NOT NULL PRIMARY KEY,
       value TEXT NOT NULL,
       transaction_id TEXT NOT NULL,
-      FOREIGN KEY (transaction_id) REFERENCES ${
-    sql.id(TXLOG_PREFIX + "_transactions")
-  } (id)
+      FOREIGN KEY (transaction_id) REFERENCES txlog_transactions (id)
     )
   `.execute(db);
 
   await sql`
-    CREATE TABLE IF NOT EXISTS ${sql.id(TXLOG_PREFIX + "_effects")} (
+    CREATE TABLE IF NOT EXISTS txlog_effects (
       id TEXT NOT NULL PRIMARY KEY,
       from_program TEXT NOT NULL,
       to_program TEXT NOT NULL,
       content TEXT NOT NULL,
       timestamp INTEGER NOT NULL,
       transaction_id TEXT NOT NULL,
-      FOREIGN KEY (transaction_id) REFERENCES ${
-    sql.id(TXLOG_PREFIX + "_transactions")
-  } (id)
+      FOREIGN KEY (transaction_id) REFERENCES txlog_transactions (id)
     )
   `.execute(db);
 }
@@ -125,7 +160,7 @@ export class TransactionLog {
 
   constructor(options: SqliteTransactionLogOptions) {
     this.db = options.db;
-    this.dag = createDAG(this.db, TXLOG_PREFIX);
+    this.dag = createDAG(this.db, "txlog");
   }
 
   static async create(
@@ -139,7 +174,7 @@ export class TransactionLog {
 
   private async loadCurrent(): Promise<void> {
     const row = await this.db
-      .selectFrom(TXLOG_PREFIX + "_transactions")
+      .selectFrom("txlog_transactions")
       .select("id")
       .where("is_current", "=", 1)
       .executeTakeFirst();
@@ -154,15 +189,21 @@ export class TransactionLog {
     const txId = tx.id;
     const isCurrent = this.current === undefined ? 1 : 0;
 
-    await qb
-      .insertInto(TXLOG_PREFIX + "_transactions")
-      .values({
-        id: txId,
-        is_current: isCurrent,
-        created_at: tx.root.timestamp,
-      } as any)
-      .onConflict((oc) => oc.column("id").doNothing())
-      .execute();
+    try {
+      await qb
+        .insertInto("txlog_transactions")
+        .values({
+          id: txId,
+          is_current: isCurrent,
+          created_at: tx.root.timestamp,
+        })
+        .execute();
+    } catch (e) {
+      console.error(
+        `CRITICAL: Failed to insert transaction ${txId} - ${e instanceof Error ? e.message : "unknown error"}`,
+      );
+      throw new Error(`Transaction insert failed for ${txId}`);
+    }
 
     if (isCurrent) {
       this.current = txId;
@@ -178,20 +219,26 @@ export class TransactionLog {
     dbParam?: Kysely<any>,
   ): Promise<void> {
     const qb = dbParam ?? this.db;
-    await qb
-      .insertInto(TXLOG_PREFIX + "_events")
-      .values({
-        id: event.id,
-        from_program: event.from,
-        to_program: event.to,
-        content: JSON.stringify(event.content),
-        timestamp: event.timestamp,
-        parent_event_id: parentEventId,
-        transaction_id: transactionId,
-        is_effect: 0,
-      } as any)
-      .onConflict((oc) => oc.column("id").doNothing())
-      .execute();
+    try {
+      await qb
+        .insertInto("txlog_events")
+        .values({
+          id: event.id,
+          from_program: event.from,
+          to_program: event.to,
+          content: JSON.stringify(event.content),
+          timestamp: event.timestamp,
+          parent_event_id: parentEventId,
+          transaction_id: transactionId,
+          is_effect: 0,
+        })
+        .execute();
+    } catch (e) {
+      console.error(
+        `CRITICAL: Failed to insert event ${event.id} - ${e instanceof Error ? e.message : "unknown error"}`,
+      );
+      throw e;
+    }
 
     if (event.children) {
       for (const child of event.children) {
@@ -207,15 +254,22 @@ export class TransactionLog {
   ): Promise<void> {
     const qb = dbParam ?? this.db;
     for (const input of inputs) {
-      await qb
-        .insertInto(TXLOG_PREFIX + "_inputs")
-        .values({
-          id: crypto.randomUUID(),
-          call_id: input.callId,
-          value: JSON.stringify(input.value),
-          transaction_id: transactionId,
-        } as any)
-        .execute();
+      try {
+        await qb
+          .insertInto("txlog_inputs")
+          .values({
+            id: crypto.randomUUID(),
+            call_id: input.callId,
+            value: JSON.stringify(input.value),
+            transaction_id: transactionId,
+          })
+          .execute();
+      } catch (e) {
+        console.error(
+          `CRITICAL: Failed to insert input for transaction ${transactionId} - ${e instanceof Error ? e.message : "unknown error"}`,
+        );
+        throw e;
+      }
     }
   }
 
@@ -226,14 +280,21 @@ export class TransactionLog {
   ): Promise<void> {
     const qb = dbParam ?? this.db;
     for (const diff of diffs) {
-      await qb
-        .insertInto(TXLOG_PREFIX + "_state_diffs")
-        .values({
-          id: diff.id,
-          value: JSON.stringify(diff.value),
-          transaction_id: transactionId,
-        } as any)
-        .execute();
+      try {
+        await qb
+          .insertInto("txlog_state_diffs")
+          .values({
+            id: diff.id,
+            value: JSON.stringify(diff.value),
+            transaction_id: transactionId,
+          })
+          .execute();
+      } catch (e) {
+        console.error(
+          `CRITICAL: Failed to insert state diff ${diff.id} - ${e instanceof Error ? e.message : "unknown error"}`,
+        );
+        throw e;
+      }
     }
   }
 
@@ -244,35 +305,42 @@ export class TransactionLog {
   ): Promise<void> {
     const qb = dbParam ?? this.db;
     for (const effect of effects) {
-      await qb
-        .insertInto(TXLOG_PREFIX + "_effects")
-        .values({
-          id: effect.id,
-          from_program: effect.from,
-          to_program: effect.to,
-          content: JSON.stringify(effect.content),
-          timestamp: effect.timestamp,
-          transaction_id: transactionId,
-        } as any)
-        .execute();
+      try {
+        await qb
+          .insertInto("txlog_effects")
+          .values({
+            id: effect.id,
+            from_program: effect.from,
+            to_program: effect.to,
+            content: JSON.stringify(effect.content),
+            timestamp: effect.timestamp,
+            transaction_id: transactionId,
+          })
+          .execute();
+      } catch (e) {
+        console.error(
+          `CRITICAL: Failed to insert effect ${effect.id} - ${e instanceof Error ? e.message : "unknown error"}`,
+        );
+        throw e;
+      }
     }
   }
 
   private async getEvent(eventId: EventId, dbParam?: Kysely<any>): Promise<Event | null> {
     const qb = dbParam ?? this.db;
     const rows = await qb
-      .selectFrom(TXLOG_PREFIX + "_events")
+      .selectFrom("txlog_events")
       .selectAll()
       .where("id", "=", eventId)
       .execute();
 
     if (rows.length === 0) return null;
 
-    const row = rows[0] as any;
+    const row = rows[0] as TxLogEvent;
     return {
       id: row.id as EventId,
-      from: row.from_program,
-      to: row.to_program,
+      from: row.from_program as ProgramHash,
+      to: row.to_program as ProgramHash,
       content: JSON.parse(row.content),
       timestamp: row.timestamp,
       children: [],
@@ -285,14 +353,14 @@ export class TransactionLog {
 
     const qb = dbParam ?? this.db;
     const childrenRows = await qb
-      .selectFrom(TXLOG_PREFIX + "_events")
+      .selectFrom("txlog_events")
       .selectAll()
       .where("parent_event_id", "=", eventId)
       .execute();
 
     const children: Event[] = [];
-    for (const childRow of childrenRows as any[]) {
-      const child = await this.getEventWithChildren(childRow.id, dbParam);
+    for (const childRow of childrenRows as TxLogEvent[]) {
+      const child = await this.getEventWithChildren(childRow.id as EventId, dbParam);
       if (child) children.push(child);
     }
 
@@ -303,13 +371,13 @@ export class TransactionLog {
   private async getInputs(transactionId: TransactionId, dbParam?: Kysely<any>): Promise<Input[]> {
     const qb = dbParam ?? this.db;
     const rows = await qb
-      .selectFrom(TXLOG_PREFIX + "_inputs")
+      .selectFrom("txlog_inputs")
       .selectAll()
       .where("transaction_id", "=", transactionId)
       .execute();
 
-    return (rows as any[]).map((row) => ({
-      callId: row.call_id,
+    return (rows as TxLogInput[]).map((row) => ({
+      callId: row.call_id as CallId,
       value: JSON.parse(row.value),
     }));
   }
@@ -317,12 +385,12 @@ export class TransactionLog {
   private async getDiffs(transactionId: TransactionId, dbParam?: Kysely<any>): Promise<StateDiff[]> {
     const qb = dbParam ?? this.db;
     const rows = await qb
-      .selectFrom(TXLOG_PREFIX + "_state_diffs")
+      .selectFrom("txlog_state_diffs")
       .selectAll()
       .where("transaction_id", "=", transactionId)
       .execute();
 
-    return (rows as any[]).map((row) => ({
+    return (rows as TxLogStateDiff[]).map((row) => ({
       id: row.id,
       value: JSON.parse(row.value),
     }));
@@ -330,7 +398,12 @@ export class TransactionLog {
 
   async appendCurrent(tx: Transaction, dbParam?: Kysely<any>): Promise<void> {
     const exists = await this.dag.getNode(tx.id, dbParam);
-    if (exists) return;
+    if (exists) {
+      console.error(
+        `CRITICAL: Transaction ${tx.id} already exists - refusing to append!`,
+      );
+      throw new Error(`Transaction ${tx.id} already exists`);
+    }
 
     const hasCurrent = !!this.current;
 
@@ -352,7 +425,12 @@ export class TransactionLog {
     dbParam?: Kysely<any>,
   ): Promise<Result<void, Error>> {
     const nodeExists = await this.dag.getNode(from, dbParam);
-    if (!nodeExists) return err(new Error("Transaction not found"));
+    if (!nodeExists) {
+      console.error(
+        `CRITICAL: Cannot append transaction ${tx.id} - parent transaction ${from} does not exist!`,
+      );
+      return err(new Error(`Parent transaction ${from} not found`));
+    }
 
     await this.insertTransaction(tx, dbParam);
     await this.insertInputs(tx.inputs, tx.id, dbParam);
@@ -366,23 +444,43 @@ export class TransactionLog {
   }
 
   async rollbackTo(id: TransactionId, dbParam?: Kysely<any>): Promise<Result<void, Error>> {
-    const qb = dbParam ?? this.db;
     const nodeExists = await this.dag.getNode(id, dbParam);
-    if (!nodeExists) return err(new Error("Transaction not found"));
-
-    if (this.current) {
-      await qb
-        .updateTable(TXLOG_PREFIX + "_transactions")
-        .set({ is_current: 0 })
-        .where("id", "=", this.current)
-        .execute();
+    if (!nodeExists) {
+      console.error(
+        `CRITICAL: Cannot rollback to ${id} - transaction does not exist!`,
+      );
+      return err(new Error(`Transaction ${id} not found`));
     }
 
-    await this.db
-      .updateTable(TXLOG_PREFIX + "_transactions")
-      .set({ is_current: 1 })
-      .where("id", "=", id)
-      .execute();
+    const qb = dbParam ?? this.db;
+
+    if (this.current) {
+      try {
+        await qb
+          .updateTable("txlog_transactions")
+          .set({ is_current: 0 })
+          .where("id", "=", this.current)
+          .execute();
+      } catch (e) {
+        console.error(
+          `CRITICAL: Failed to unset current transaction ${this.current} - ${e instanceof Error ? e.message : "unknown error"}`,
+        );
+        throw e;
+      }
+    }
+
+    try {
+      await qb
+        .updateTable("txlog_transactions")
+        .set({ is_current: 1 })
+        .where("id", "=", id)
+        .execute();
+    } catch (e) {
+      console.error(
+        `CRITICAL: Failed to set current transaction to ${id} - ${e instanceof Error ? e.message : "unknown error"}`,
+      );
+      throw e;
+    }
 
     this.current = id;
     return ok();
@@ -391,18 +489,17 @@ export class TransactionLog {
   async get(id: TransactionId, dbParam?: Kysely<any>): Promise<Transaction | undefined> {
     const qb = dbParam ?? this.db;
     const txRows = await qb
-      .selectFrom(TXLOG_PREFIX + "_transactions")
+      .selectFrom("txlog_transactions")
       .selectAll()
       .where("id", "=", id)
       .execute();
 
     if (txRows.length === 0) return undefined;
 
-    const txRow = txRows[0] as any;
+    const txRow = txRows[0] as TxLogTransaction;
 
-    // Find root event: transaction_id = txId AND parent_event_id IS NULL
     const rootRows = await qb
-      .selectFrom(TXLOG_PREFIX + "_events")
+      .selectFrom("txlog_events")
       .selectAll()
       .where("transaction_id", "=", id)
       .where("parent_event_id", "is", null)
@@ -432,15 +529,15 @@ export class TransactionLog {
   private async getEffects(transactionId: TransactionId, dbParam?: Kysely<any>): Promise<Event[]> {
     const qb = dbParam ?? this.db;
     const rows = await qb
-      .selectFrom(TXLOG_PREFIX + "_effects")
+      .selectFrom("txlog_effects")
       .selectAll()
       .where("transaction_id", "=", transactionId)
       .execute();
 
-    return (rows as any[]).map((row) => ({
+    return (rows as TxLogEffect[]).map((row) => ({
       id: row.id as EventId,
-      from: row.from_program,
-      to: row.to_program,
+      from: row.from_program as ProgramHash,
+      to: row.to_program as ProgramHash,
       content: JSON.parse(row.content),
       timestamp: row.timestamp,
     }));
