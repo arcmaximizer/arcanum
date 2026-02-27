@@ -26,10 +26,6 @@ version: 0.0.0
 name: My App
 desc: My awesome application
 entrypoint: main.ts
-
-capabilities:
-  - sys/arcnet:send,receive
-  - sys/timer:set
 ```
 
 The `local` developer is a reserved developer ID in the Arcanum namespace and is

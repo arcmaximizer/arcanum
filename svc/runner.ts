@@ -7,15 +7,18 @@ class Runner {
   constructor() {}
   spawn() {
   }
-  async executeRoot(id: TransactionId, root: Event): Result<Transaction, Error> {
+  async executeRoot(
+    id: TransactionId,
+    root: Event,
+  ): Result<Transaction, Error> {
     // execute a root event
-    
+
     return {
       id,
       root,
       diffs: [],
       inputs: [],
-      effects: []
-    }
+      effects: [],
+    };
   }
 }

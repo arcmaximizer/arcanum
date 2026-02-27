@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "strict": true,
-    "lib": ["deno.window", "deno.worker"]
+    "lib": ["deno.window", "deno.worker", "esnext", "node"],
+    "allowImportingTsExtensions": true
   }
 }
