@@ -2,30 +2,32 @@ import { Database } from "@db/sqlite";
 import { Kysely, sql } from "kysely";
 import { assertEquals, assertExists, assertRejects } from "@std/assert";
 import {
-  addEdge,
+  addChild,
   addNode,
-  createDAGTables,
-  dropDAGTables,
+  createTreeTables,
+  dropTreeTables,
+  getHead,
   getNode,
+  getParent,
   nodes,
-  roots,
+  setHead,
   topologicalSort,
   traverse,
   traverseFrom,
 } from "../lib/dag_sqlite.ts";
 import { DenoSqliteDialect } from "../lib/db_adapter.ts";
-import type { DAGDatabase } from "../lib/dag_sqlite.ts";
+import type { TreeDatabase } from "../lib/dag_sqlite.ts";
 
-function createTestDb(): Kysely<DAGDatabase> {
+function createTestDb(): Kysely<TreeDatabase> {
   const db = new Database(":memory:");
-  return new Kysely<DAGDatabase>({
+  return new Kysely<TreeDatabase>({
     dialect: new DenoSqliteDialect({ database: db }),
   });
 }
 
-Deno.test("createDAGTables creates nodes and edges tables", async () => {
+Deno.test("createTreeTables creates nodes, edges, and heads tables", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
   const nodesTable = await sql<{ name: string }>`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'nodes'
@@ -33,20 +35,24 @@ Deno.test("createDAGTables creates nodes and edges tables", async () => {
   const edgesTable = await sql<{ name: string }>`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'edges'
   `.execute(db);
+  const headsTable = await sql<{ name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'heads'
+  `.execute(db);
 
   assertEquals(nodesTable.rows.length, 1);
   assertEquals(edgesTable.rows.length, 1);
+  assertEquals(headsTable.rows.length, 1);
 
   await db.destroy();
 });
 
-Deno.test("dropDAGTables removes tables", async () => {
+Deno.test("dropTreeTables removes tables", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
-  await dropDAGTables(db);
+  await createTreeTables(db);
+  await dropTreeTables(db);
 
   const tables = await sql<{ name: string }>`
-    SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nodes', 'edges')
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nodes', 'edges', 'heads')
   `.execute(db);
 
   assertEquals(tables.rows.length, 0);
@@ -55,7 +61,7 @@ Deno.test("dropDAGTables removes tables", async () => {
 
 Deno.test("addNode inserts node", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
   await addNode(db, "a");
 
@@ -67,7 +73,7 @@ Deno.test("addNode inserts node", async () => {
 
 Deno.test("addNode is idempotent", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
   await addNode(db, "a");
   await addNode(db, "a");
@@ -80,7 +86,7 @@ Deno.test("addNode is idempotent", async () => {
 
 Deno.test("getNode returns false for non-existent node", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
   const exists = await getNode(db, "nonexistent");
   assertEquals(exists, false);
@@ -88,54 +94,88 @@ Deno.test("getNode returns false for non-existent node", async () => {
   await db.destroy();
 });
 
-Deno.test("addEdge creates nodes and edge", async () => {
+Deno.test("setHead creates node and sets head", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
-  await addEdge(db, "a", "b");
+  await setHead(db, "a");
+
+  const head = await getHead(db);
+  assertEquals(head, "a");
+
+  const allNodes = await nodes(db);
+  assertEquals(allNodes, ["a"]);
+
+  await db.destroy();
+});
+
+Deno.test("setHead is idempotent", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await setHead(db, "a");
+  await setHead(db, "a");
+
+  const head = await getHead(db);
+  assertEquals(head, "a");
+
+  await db.destroy();
+});
+
+Deno.test("addChild creates nodes and edge", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await setHead(db, "a");
+  await addChild(db, "a", "b");
 
   const allNodes = await nodes(db);
   assertEquals(allNodes.sort(), ["a", "b"]);
 
-  const rootIds = await roots(db);
-  assertEquals(rootIds, ["a"]);
+  const parent = await getParent(db, "b");
+  assertEquals(parent, "a");
 
   await db.destroy();
 });
 
-Deno.test("addEdge is idempotent", async () => {
+Deno.test("addChild is idempotent", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
-  await addEdge(db, "a", "b");
-  await addEdge(db, "a", "b");
+  await setHead(db, "a");
+  await addChild(db, "a", "b");
+  await addChild(db, "a", "b");
 
   const sorted = await topologicalSort(db);
-  assertEquals(sorted.includes("a"), true);
-  assertEquals(sorted.includes("b"), true);
-  assertEquals(sorted.indexOf("a") > sorted.indexOf("b"), true);
+  assertEquals(sorted, ["a", "b"]);
 
   await db.destroy();
 });
 
-Deno.test("addEdge rejects self-loop", async () => {
+Deno.test("addChild rejects adding second parent to child", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
+
+  await setHead(db, "a");
+  await addChild(db, "a", "b");
 
   await assertRejects(
-    () => addEdge(db, "a", "a"),
+    () => addChild(db, "c", "b"),
     Error,
-    "would create a cycle",
+    "already has a parent",
   );
+
+  const parent = await getParent(db, "b");
+  assertEquals(parent, "a");
 
   await db.destroy();
 });
 
 Deno.test("nodes returns all node ids", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
-  await addNode(db, "a");
+  await setHead(db, "a");
   await addNode(db, "b");
   await addNode(db, "c");
 
@@ -145,61 +185,46 @@ Deno.test("nodes returns all node ids", async () => {
   await db.destroy();
 });
 
-Deno.test("roots returns nodes with no incoming edges", async () => {
+Deno.test("heads returns the head node", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
-  await addEdge(db, "a", "b");
-  await addEdge(db, "a", "c");
-  await addEdge(db, "b", "d");
-  await addEdge(db, "c", "d");
+  await setHead(db, "a");
+  await addChild(db, "a", "b");
+  await addChild(db, "a", "c");
+  await addChild(db, "b", "d");
 
-  const rootIds = await roots(db);
-  assertEquals(rootIds, ["a"]);
-
-  await db.destroy();
-});
-
-Deno.test("roots returns all nodes if no edges", async () => {
-  const db = createTestDb();
-  await createDAGTables(db);
-
-  await addNode(db, "a");
-  await addNode(db, "b");
-
-  const rootIds = await roots(db);
-  assertEquals(rootIds.sort(), ["a", "b"]);
+  const headIds = await heads(db);
+  assertEquals(headIds, ["a"]);
 
   await db.destroy();
 });
 
 Deno.test("topologicalSort returns dependencies first", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
-  await addEdge(db, "a", "b");
-  await addEdge(db, "a", "c");
-  await addEdge(db, "b", "d");
-  await addEdge(db, "c", "d");
+  await setHead(db, "a");
+  await addChild(db, "a", "b");
+  await addChild(db, "a", "c");
+  await addChild(db, "b", "d");
 
   const sorted = await topologicalSort(db);
 
-  assertEquals(sorted.indexOf("a") > sorted.indexOf("b"), true);
-  assertEquals(sorted.indexOf("a") > sorted.indexOf("c"), true);
-  assertEquals(sorted.indexOf("b") > sorted.indexOf("d"), true);
-  assertEquals(sorted.indexOf("c") > sorted.indexOf("d"), true);
+  assertEquals(sorted.indexOf("a") < sorted.indexOf("b"), true);
+  assertEquals(sorted.indexOf("b") < sorted.indexOf("d"), true);
 
   await db.destroy();
 });
 
 Deno.test("traverse visits nodes depth-first", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
-  await addEdge(db, "a", "b");
-  await addEdge(db, "a", "c");
-  await addEdge(db, "b", "d");
-  await addEdge(db, "c", "d");
+  await setHead(db, "a");
+  await addChild(db, "a", "b");
+  await addChild(db, "a", "c");
+  await addChild(db, "b", "d");
 
   const visited: string[] = [];
   await traverse(db, (id: string) => visited.push(id), undefined);
@@ -214,10 +239,11 @@ Deno.test("traverse visits nodes depth-first", async () => {
 
 Deno.test("traverse provides correct state", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
-  await addEdge(db, "a", "b");
-  await addEdge(db, "a", "c");
+  await setHead(db, "a");
+  await addChild(db, "a", "b");
+  await addChild(db, "a", "c");
 
   const states: { id: string; parent: string | null; depth: number }[] = [];
   await traverse(
@@ -243,10 +269,11 @@ Deno.test("traverse provides correct state", async () => {
 
 Deno.test("traverse tracks index and total correctly", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
-  await addEdge(db, "a", "b");
-  await addEdge(db, "a", "c");
+  await setHead(db, "a");
+  await addChild(db, "a", "b");
+  await addChild(db, "a", "c");
 
   const states: { id: string; index: number; total: number }[] = [];
   await traverse(db, (id: string, state: { index: number; total: number }) => {
@@ -265,54 +292,40 @@ Deno.test("traverse tracks index and total correctly", async () => {
   await db.destroy();
 });
 
-Deno.test("handles diamond dependency graph", async () => {
+Deno.test("handles tree with branching", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
-  await addEdge(db, "a", "b");
-  await addEdge(db, "a", "c");
-  await addEdge(db, "b", "d");
-  await addEdge(db, "c", "d");
+  await setHead(db, "a");
+  await addChild(db, "a", "b");
+  await addChild(db, "a", "c");
+  await addChild(db, "b", "d");
+  await addChild(db, "c", "e");
 
   const sorted = await topologicalSort(db);
 
-  assertEquals(sorted.indexOf("a") > sorted.indexOf("b"), true);
-  assertEquals(sorted.indexOf("a") > sorted.indexOf("c"), true);
-  assertEquals(sorted.indexOf("b") > sorted.indexOf("d"), true);
-  assertEquals(sorted.indexOf("c") > sorted.indexOf("d"), true);
+  assertEquals(sorted.indexOf("a") < sorted.indexOf("b"), true);
+  assertEquals(sorted.indexOf("b") < sorted.indexOf("d"), true);
+  assertEquals(sorted.indexOf("c") < sorted.indexOf("e"), true);
 
   const visited: string[] = [];
   await traverse(db, (id: string) => visited.push(id), undefined);
-  const dCount = visited.filter((id) => id === "d").length;
-  assertEquals(dCount, 2);
 
-  await db.destroy();
-});
-
-Deno.test("handles disconnected subgraphs", async () => {
-  const db = createTestDb();
-  await createDAGTables(db);
-
-  await addEdge(db, "a", "b");
-  await addEdge(db, "c", "d");
-
-  const rootIds = await roots(db);
-  assertEquals(rootIds.sort(), ["a", "c"]);
-
-  const sorted = await topologicalSort(db);
-  assertEquals(sorted.length, 4);
+  assertEquals(visited.length, 5);
+  assertEquals(visited.filter((id) => id === "d").length, 1);
 
   await db.destroy();
 });
 
 Deno.test("traverseFrom visits descendants of specific node", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
-  await addEdge(db, "a", "b");
-  await addEdge(db, "a", "c");
-  await addEdge(db, "b", "d");
-  await addEdge(db, "c", "d");
+  await setHead(db, "a");
+  await addChild(db, "a", "b");
+  await addChild(db, "a", "c");
+  await addChild(db, "b", "d");
+  await addChild(db, "c", "e");
 
   const visited: string[] = [];
   await traverseFrom(db, "a", (id: string) => visited.push(id), undefined);
@@ -321,15 +334,17 @@ Deno.test("traverseFrom visits descendants of specific node", async () => {
   assertEquals(visited.includes("b"), true);
   assertEquals(visited.includes("c"), true);
   assertEquals(visited.includes("d"), true);
+  assertEquals(visited.includes("e"), true);
 
   await db.destroy();
 });
 
 Deno.test("traverseFrom with context", async () => {
   const db = createTestDb();
-  await createDAGTables(db);
+  await createTreeTables(db);
 
-  await addEdge(db, "a", "b");
+  await setHead(db, "a");
+  await addChild(db, "a", "b");
 
   const depths: number[] = [];
   await traverseFrom(db, "a", (_id: string, state: { depth: number }) => {
@@ -340,3 +355,34 @@ Deno.test("traverseFrom with context", async () => {
 
   await db.destroy();
 });
+
+Deno.test("topologicalSort returns empty when no head", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  const sorted = await topologicalSort(db);
+  assertEquals(sorted, []);
+
+  await db.destroy();
+});
+
+Deno.test("traverse returns early when no head", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  const visited: string[] = [];
+  await traverse(db, (id: string) => visited.push(id), undefined);
+  assertEquals(visited, []);
+
+  await db.destroy();
+});
+
+async function heads(
+  trx: Kysely<TreeDatabase>,
+): Promise<string[]> {
+  const rows = await trx
+    .selectFrom("heads")
+    .select("id")
+    .execute();
+  return rows.map((r) => r.id);
+}

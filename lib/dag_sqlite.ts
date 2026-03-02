@@ -1,12 +1,15 @@
 import { type Kysely } from "kysely";
 
-export interface DAGDatabase {
+export interface TreeDatabase {
   nodes: {
     id: string;
   };
   edges: {
-    from_id: string;
-    to_id: string;
+    parent_id: string;
+    child_id: string;
+  };
+  heads: {
+    id: string;
   };
 }
 
@@ -17,15 +20,13 @@ export interface TraversalState {
   readonly total: number;
 }
 
-export type DAGVisitor<C> = (
+export type TreeVisitor<C> = (
   id: string,
   state: TraversalState,
   context: C,
 ) => void;
 
-export async function createDAGTables(
-  db: Kysely<any>,
-): Promise<void> {
+export async function up(db: Kysely<any>): Promise<void> {
   await db.schema
     .createTable("nodes")
     .addColumn("id", "text", (col) => col.notNull())
@@ -34,33 +35,44 @@ export async function createDAGTables(
 
   await db.schema
     .createTable("edges")
-    .addColumn("from_id", "text", (col) => col.notNull())
-    .addColumn("to_id", "text", (col) => col.notNull())
-    .addPrimaryKeyConstraint("pk_edges", ["from_id", "to_id"])
+    .addColumn("parent_id", "text", (col) => col.notNull())
+    .addColumn("child_id", "text", (col) => col.notNull())
+    .addPrimaryKeyConstraint("pk_edges", ["parent_id", "child_id"])
     .addForeignKeyConstraint(
-      "fk_edges_from_id",
-      ["from_id"],
+      "fk_edges_parent_id",
+      ["parent_id"],
       "nodes",
       ["id"],
     )
     .addForeignKeyConstraint(
-      "fk_edges_to_id",
-      ["to_id"],
+      "fk_edges_child_id",
+      ["child_id"],
+      "nodes",
+      ["id"],
+    )
+    .execute();
+
+  await db.schema
+    .createTable("heads")
+    .addColumn("id", "text", (col) => col.notNull().unique())
+    .addPrimaryKeyConstraint("pk_heads", ["id"])
+    .addForeignKeyConstraint(
+      "fk_heads_id",
+      ["id"],
       "nodes",
       ["id"],
     )
     .execute();
 }
 
-export async function dropDAGTables(
-  db: Kysely<any>,
-): Promise<void> {
+export async function down(db: Kysely<any>): Promise<void> {
+  await db.schema.dropTable("heads").execute();
   await db.schema.dropTable("edges").execute();
   await db.schema.dropTable("nodes").execute();
 }
 
 export async function addNode(
-  trx: Kysely<DAGDatabase>,
+  trx: Kysely<TreeDatabase>,
   id: string,
 ): Promise<void> {
   await trx
@@ -71,7 +83,7 @@ export async function addNode(
 }
 
 export async function getNode(
-  trx: Kysely<DAGDatabase>,
+  trx: Kysely<TreeDatabase>,
   id: string,
 ): Promise<boolean> {
   const row = await trx
@@ -82,117 +94,183 @@ export async function getNode(
   return row !== undefined;
 }
 
-export async function addEdge(
-  trx: Kysely<DAGDatabase>,
-  from: string,
-  to: string,
+export async function setHead(
+  trx: Kysely<TreeDatabase>,
+  id: string,
 ): Promise<void> {
-  if (from === to) {
-    throw new Error(`Adding edge [${from}] -> [${to}] would create a cycle`);
-  }
+  const node = await trx
+    .selectFrom("nodes")
+    .selectAll()
+    .where("id", "=", id)
+    .executeTakeFirst();
 
-  const [fromNode, toNode] = await Promise.all([
-    trx
-      .selectFrom("nodes")
-      .selectAll()
-      .where("id", "=", from)
-      .executeTakeFirst(),
-    trx
-      .selectFrom("nodes")
-      .selectAll()
-      .where("id", "=", to)
-      .executeTakeFirst(),
-  ]);
-
-  if (!fromNode) {
+  if (!node) {
     await trx
       .insertInto("nodes")
-      .values({ id: from })
+      .values({ id })
       .execute();
   }
 
-  if (!toNode) {
+  await trx
+    .insertInto("heads")
+    .values({ id })
+    .onConflict((oc) => oc.column("id").doNothing())
+    .execute();
+}
+
+export async function getHead(
+  trx: Kysely<TreeDatabase>,
+): Promise<string | null> {
+  const row = await trx
+    .selectFrom("heads")
+    .select("id")
+    .executeTakeFirst();
+  return row?.id ?? null;
+}
+
+export async function addChild(
+  trx: Kysely<TreeDatabase>,
+  parent: string,
+  child: string,
+): Promise<void> {
+  const existingEdge = await trx
+    .selectFrom("edges")
+    .select("parent_id")
+    .where("child_id", "=", child)
+    .where("parent_id", "=", parent)
+    .executeTakeFirst();
+
+  if (existingEdge) {
+    return;
+  }
+
+  const existingParent = await trx
+    .selectFrom("edges")
+    .select("parent_id")
+    .where("child_id", "=", child)
+    .executeTakeFirst();
+
+  if (existingParent) {
+    throw new Error(
+      `Node [${child}] already has a parent [${existingParent.parent_id}]. Trees require single parent.`,
+    );
+  }
+
+  const [parentNode, childNode] = await Promise.all([
+    trx
+      .selectFrom("nodes")
+      .selectAll()
+      .where("id", "=", parent)
+      .executeTakeFirst(),
+    trx
+      .selectFrom("nodes")
+      .selectAll()
+      .where("id", "=", child)
+      .executeTakeFirst(),
+  ]);
+
+  if (!parentNode) {
     await trx
       .insertInto("nodes")
-      .values({ id: to })
+      .values({ id: parent })
+      .execute();
+  }
+
+  if (!childNode) {
+    await trx
+      .insertInto("nodes")
+      .values({ id: child })
       .execute();
   }
 
   await trx
     .insertInto("edges")
-    .values({ from_id: from, to_id: to })
-    .onConflict((oc) => oc.columns(["from_id", "to_id"]).doNothing())
+    .values({ parent_id: parent, child_id: child })
+    .onConflict((oc) => oc.columns(["parent_id", "child_id"]).doNothing())
     .execute();
 }
 
-export async function roots(
-  trx: Kysely<DAGDatabase>,
+export async function getParent(
+  trx: Kysely<TreeDatabase>,
+  childId: string,
+): Promise<string | null> {
+  const row = await trx
+    .selectFrom("edges")
+    .select("parent_id")
+    .where("child_id", "=", childId)
+    .executeTakeFirst();
+  return row?.parent_id ?? null;
+}
+
+export async function getChildren(
+  trx: Kysely<TreeDatabase>,
+  parentId: string,
 ): Promise<string[]> {
   const rows = await trx
-    .selectFrom("nodes")
-    .select("nodes.id")
-    .leftJoin("edges", "nodes.id", "edges.to_id")
-    .where("edges.to_id", "is", null)
+    .selectFrom("edges")
+    .select("child_id")
+    .where("parent_id", "=", parentId)
     .execute();
+  return rows.map((r) => r.child_id);
+}
 
+export async function heads(
+  trx: Kysely<TreeDatabase>,
+): Promise<string[]> {
+  const rows = await trx
+    .selectFrom("heads")
+    .select("id")
+    .execute();
   return rows.map((r) => r.id);
 }
 
 export async function nodes(
-  trx: Kysely<DAGDatabase>,
+  trx: Kysely<TreeDatabase>,
 ): Promise<string[]> {
   const rows = await trx
     .selectFrom("nodes")
     .select("id")
     .execute();
-
   return rows.map((r) => r.id);
 }
 
 export async function topologicalSort(
-  trx: Kysely<DAGDatabase>,
+  trx: Kysely<TreeDatabase>,
 ): Promise<string[]> {
-  const rootIds = await roots(trx);
+  const headId = await getHead(trx);
+  if (!headId) return [];
 
   const sorted: string[] = [];
   const visited = new Set<string>();
 
-  async function visit(nodeId: string, depth: number): Promise<void> {
+  async function visit(nodeId: string): Promise<void> {
     if (visited.has(nodeId)) return;
     visited.add(nodeId);
 
-    const children = await trx
-      .selectFrom("edges")
-      .select("to_id")
-      .where("from_id", "=", nodeId)
-      .execute();
-
-    for (const child of children) {
-      await visit(child.to_id, depth + 1);
-    }
-
     sorted.push(nodeId);
+
+    const children = await getChildren(trx, nodeId);
+    for (const child of children) {
+      await visit(child);
+    }
   }
 
-  for (const rootId of rootIds) {
-    await visit(rootId, 0);
-  }
-
-  for (const row of await trx.selectFrom("nodes").select("id").execute()) {
-    await visit(row.id, 0);
-  }
+  await visit(headId);
 
   return sorted;
 }
 
 export async function traverse<C>(
-  trx: Kysely<DAGDatabase>,
-  visitor: DAGVisitor<C>,
+  trx: Kysely<TreeDatabase>,
+  visitor: TreeVisitor<C>,
   context: C,
 ): Promise<void> {
-  const rootIds = await roots(trx);
+  const headId = await getHead(trx);
+  if (!headId) return;
 
   const outgoing = await loadOutgoing(trx);
+
+  const childCount = (outgoing.get(headId) ?? []).length;
 
   function visitNode(
     id: string,
@@ -209,57 +287,50 @@ export async function traverse<C>(
     });
   }
 
-  rootIds.forEach((rootId, i) => {
-    visitNode(rootId, null, 0, i, rootIds.length);
-  });
+  visitNode(headId, null, 0, 0, childCount);
 }
 
 export async function traverseFrom<C>(
-  trx: Kysely<DAGDatabase>,
+  trx: Kysely<TreeDatabase>,
   nodeId: string,
-  visitor: DAGVisitor<C>,
+  visitor: TreeVisitor<C>,
   context: C,
 ): Promise<void> {
   const outgoing = await loadOutgoing(trx);
 
-  const childCount = await trx
-    .selectFrom("edges")
-    .select((eb) => eb.fn.count<number>("to_id").as("count"))
-    .where("from_id", "=", nodeId)
-    .executeTakeFirst();
-
-  const total = childCount?.count ?? 0;
+  const childCount = (outgoing.get(nodeId) ?? []).length;
 
   function visitNode(
     id: string,
     parent: string | null,
     depth: number,
     index: number,
+    total: number,
   ): void {
     visitor(id, { parent, depth, index, total }, context);
 
     const children = outgoing.get(id) ?? [];
     children.forEach((childId, i) => {
-      visitNode(childId, id, depth + 1, i);
+      visitNode(childId, id, depth + 1, i, children.length);
     });
   }
 
-  visitNode(nodeId, null, 0, 0);
+  visitNode(nodeId, null, 0, 0, childCount);
 }
 
 async function loadOutgoing(
-  trx: Kysely<DAGDatabase>,
+  trx: Kysely<TreeDatabase>,
 ): Promise<Map<string, string[]>> {
   const edges = await trx.selectFrom("edges").selectAll().execute();
 
   const out = new Map<string, string[]>();
-  for (const { from_id, to_id } of edges) {
-    let arr = out.get(from_id);
+  for (const { parent_id, child_id } of edges) {
+    let arr = out.get(parent_id);
     if (!arr) {
       arr = [];
-      out.set(from_id, arr);
+      out.set(parent_id, arr);
     }
-    arr.push(to_id);
+    arr.push(child_id);
   }
   return out;
 }
