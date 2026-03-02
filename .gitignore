@@ -1,3 +1,4 @@
 .Trash-1000
 .DS_Store
 node_modules
+.gitignore
