@@ -1,7 +1,7 @@
-import { up, down } from "../lib/dag_sqlite.ts";
+import { down, up } from "../lib/dag_sqlite.ts";
 import { Kysely } from "kysely";
 
-export { up, down };
+export { down, up };
 
 export async function migrate(db: Kysely<any>): Promise<void> {
   await up(db);

@@ -1,4 +1,4 @@
-import { Kysely, Migrator, FileMigrationProvider } from "kysely";
+import { FileMigrationProvider, Kysely, Migrator } from "kysely";
 import { Database } from "@db/sqlite";
 import { DenoSqliteDialect } from "./lib/db_adapter.ts";
 import { ArcanumDB } from "./lib/db.ts";
@@ -17,7 +17,12 @@ class Arcanum {
         database: db,
         onCreateConnection: async (conn) => {
           await conn.executeQuery(
-            { sql: "PRAGMA foreign_keys = ON", parameters: [], queryId: { queryId: "" }, query: { kind: "RawNode" } as any },
+            {
+              sql: "PRAGMA foreign_keys = ON",
+              parameters: [],
+              queryId: { queryId: "" },
+              query: { kind: "RawNode" } as any,
+            },
           );
         },
       }),
@@ -47,7 +52,9 @@ class Arcanum {
 
     results?.forEach((it) => {
       if (it.status === "Success") {
-        console.log(`Migration "${it.migrationName}" was executed successfully`);
+        console.log(
+          `Migration "${it.migrationName}" was executed successfully`,
+        );
       } else if (it.status === "Error") {
         console.error(`Failed to execute migration "${it.migrationName}"`);
       }

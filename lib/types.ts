@@ -1,4 +1,4 @@
-import {crypto} from "crypto"
+import { crypto } from "crypto";
 
 declare const __brand: unique symbol;
 export type Brand<B> = { [__brand]: B };
@@ -30,7 +30,8 @@ export function isProgramId(value: string): value is ProgramId {
 export type UUID = Branded<string, "UUID">;
 
 export function isUUID(value: string): value is UUID {
-  return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/.test(value);
+  return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/
+    .test(value);
 }
 
 export function generateUUIDv7(): string {
@@ -53,7 +54,7 @@ export function generateUUIDv7(): string {
   // set variant (10xxxxxx)
   buf[8] = (buf[8] & 0x3f) | 0x80;
 
-  const hex = [...buf].map(b => b.toString(16).padStart(2, "0")).join("");
+  const hex = [...buf].map((b) => b.toString(16).padStart(2, "0")).join("");
 
   return (
     hex.slice(0, 8) + "-" +

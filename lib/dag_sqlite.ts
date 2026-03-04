@@ -36,7 +36,7 @@ export async function down(db: Kysely<any>): Promise<void> {
 export async function addNode(
   trx: Kysely<TreeDatabase>,
   id: string,
-  parent?: string
+  parent?: string,
 ): Promise<void> {
   await trx
     .insertInto("nodes")

@@ -1,9 +1,9 @@
 // Runner module handles running a given event and returning a transaction
 // as well as any state changes and so on
 
-import type { Event, TransactionId, Transaction } from "./events.ts";
-import type {ResultAsync} from "neverthrow"
-import {ok} from "neverthrow"
+import type { Event, Transaction, TransactionId } from "./events.ts";
+import type { ResultAsync } from "neverthrow";
+import { ok } from "neverthrow";
 
 class Runner {
   constructor() {}
