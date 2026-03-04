@@ -3,13 +3,7 @@ import { type Kysely } from "kysely";
 export interface TreeDatabase {
   nodes: {
     id: string;
-  };
-  edges: {
-    parent_id: string;
-    child_id: string;
-  };
-  heads: {
-    id: string;
+    parent: string | undefined;
   };
 }
 
@@ -30,54 +24,23 @@ export async function up(db: Kysely<any>): Promise<void> {
   await db.schema
     .createTable("nodes")
     .addColumn("id", "text", (col) => col.notNull())
+    .addColumn("parent", "text")
     .addPrimaryKeyConstraint("pk_nodes", ["id"])
-    .execute();
-
-  await db.schema
-    .createTable("edges")
-    .addColumn("parent_id", "text", (col) => col.notNull())
-    .addColumn("child_id", "text", (col) => col.notNull())
-    .addPrimaryKeyConstraint("pk_edges", ["parent_id", "child_id"])
-    .addForeignKeyConstraint(
-      "fk_edges_parent_id",
-      ["parent_id"],
-      "nodes",
-      ["id"],
-    )
-    .addForeignKeyConstraint(
-      "fk_edges_child_id",
-      ["child_id"],
-      "nodes",
-      ["id"],
-    )
-    .execute();
-
-  await db.schema
-    .createTable("heads")
-    .addColumn("id", "text", (col) => col.notNull().unique())
-    .addPrimaryKeyConstraint("pk_heads", ["id"])
-    .addForeignKeyConstraint(
-      "fk_heads_id",
-      ["id"],
-      "nodes",
-      ["id"],
-    )
     .execute();
 }
 
 export async function down(db: Kysely<any>): Promise<void> {
-  await db.schema.dropTable("heads").execute();
-  await db.schema.dropTable("edges").execute();
   await db.schema.dropTable("nodes").execute();
 }
 
 export async function addNode(
   trx: Kysely<TreeDatabase>,
   id: string,
+  parent?: string
 ): Promise<void> {
   await trx
     .insertInto("nodes")
-    .values({ id })
+    .values({ id, parent })
     .onConflict((oc) => oc.column("id").doNothing())
     .execute();
 }
@@ -94,99 +57,27 @@ export async function getNode(
   return row !== undefined;
 }
 
-export async function setHead(
-  trx: Kysely<TreeDatabase>,
-  id: string,
-): Promise<void> {
-  const node = await trx
-    .selectFrom("nodes")
-    .selectAll()
-    .where("id", "=", id)
-    .executeTakeFirst();
-
-  if (!node) {
-    await trx
-      .insertInto("nodes")
-      .values({ id })
-      .execute();
-  }
-
-  await trx
-    .insertInto("heads")
-    .values({ id })
-    .onConflict((oc) => oc.column("id").doNothing())
-    .execute();
-}
-
-export async function getHead(
-  trx: Kysely<TreeDatabase>,
-): Promise<string | null> {
-  const row = await trx
-    .selectFrom("heads")
-    .select("id")
-    .executeTakeFirst();
-  return row?.id ?? null;
-}
-
 export async function addChild(
   trx: Kysely<TreeDatabase>,
   parent: string,
   child: string,
 ): Promise<void> {
-  const existingEdge = await trx
-    .selectFrom("edges")
-    .select("parent_id")
-    .where("child_id", "=", child)
-    .where("parent_id", "=", parent)
+  const existingChild = await trx
+    .selectFrom("nodes")
+    .select("parent")
+    .where("id", "=", child)
     .executeTakeFirst();
 
-  if (existingEdge) {
-    return;
-  }
-
-  const existingParent = await trx
-    .selectFrom("edges")
-    .select("parent_id")
-    .where("child_id", "=", child)
-    .executeTakeFirst();
-
-  if (existingParent) {
+  if (existingChild?.parent !== undefined && existingChild.parent !== null) {
     throw new Error(
-      `Node [${child}] already has a parent [${existingParent.parent_id}]. Trees require single parent.`,
+      `Node [${child}] already has a parent [${existingChild.parent}]. Trees require single parent.`,
     );
   }
 
-  const [parentNode, childNode] = await Promise.all([
-    trx
-      .selectFrom("nodes")
-      .selectAll()
-      .where("id", "=", parent)
-      .executeTakeFirst(),
-    trx
-      .selectFrom("nodes")
-      .selectAll()
-      .where("id", "=", child)
-      .executeTakeFirst(),
-  ]);
-
-  if (!parentNode) {
-    await trx
-      .insertInto("nodes")
-      .values({ id: parent })
-      .execute();
-  }
-
-  if (!childNode) {
-    await trx
-      .insertInto("nodes")
-      .values({ id: child })
-      .execute();
-  }
-
   await trx
-    .insertInto("edges")
-    .values({ parent_id: parent, child_id: child })
-    .onConflict((oc) => oc.columns(["parent_id", "child_id"]).doNothing())
+    .insertInto("nodes")
+    .values({ id: child, parent })
+    .onConflict((oc) => oc.column("id").doUpdateSet({ parent }))
     .execute();
 }
 
@@ -195,11 +86,11 @@ export async function getParent(
   childId: string,
 ): Promise<string | null> {
   const row = await trx
-    .selectFrom("edges")
-    .select("parent_id")
-    .where("child_id", "=", childId)
+    .selectFrom("nodes")
+    .select("parent")
+    .where("id", "=", childId)
     .executeTakeFirst();
-  return row?.parent_id ?? null;
+  return row?.parent ?? null;
 }
 
 export async function getChildren(
@@ -207,19 +98,9 @@ export async function getChildren(
   parentId: string,
 ): Promise<string[]> {
   const rows = await trx
-    .selectFrom("edges")
-    .select("child_id")
-    .where("parent_id", "=", parentId)
-    .execute();
-  return rows.map((r) => r.child_id);
-}
-
-export async function heads(
-  trx: Kysely<TreeDatabase>,
-): Promise<string[]> {
-  const rows = await trx
-    .selectFrom("heads")
+    .selectFrom("nodes")
     .select("id")
+    .where("parent", "=", parentId)
     .execute();
   return rows.map((r) => r.id);
 }
@@ -237,8 +118,8 @@ export async function nodes(
 export async function topologicalSort(
   trx: Kysely<TreeDatabase>,
 ): Promise<string[]> {
-  const headId = await getHead(trx);
-  if (!headId) return [];
+  const roots = await getRoots(trx);
+  if (roots.length === 0) return [];
 
   const sorted: string[] = [];
   const visited = new Set<string>();
@@ -255,9 +136,22 @@ export async function topologicalSort(
     }
   }
 
-  await visit(headId);
+  for (const root of roots) {
+    await visit(root);
+  }
 
   return sorted;
+}
+
+async function getRoots(
+  trx: Kysely<TreeDatabase>,
+): Promise<string[]> {
+  const rows = await trx
+    .selectFrom("nodes")
+    .select("id")
+    .where("parent", "is", null)
+    .execute();
+  return rows.map((r) => r.id);
 }
 
 export async function traverse<C>(
@@ -265,12 +159,10 @@ export async function traverse<C>(
   visitor: TreeVisitor<C>,
   context: C,
 ): Promise<void> {
-  const headId = await getHead(trx);
-  if (!headId) return;
+  const roots = await getRoots(trx);
+  if (roots.length === 0) return;
 
   const outgoing = await loadOutgoing(trx);
-
-  const childCount = (outgoing.get(headId) ?? []).length;
 
   function visitNode(
     id: string,
@@ -287,7 +179,9 @@ export async function traverse<C>(
     });
   }
 
-  visitNode(headId, null, 0, 0, childCount);
+  roots.forEach((root, i) => {
+    visitNode(root, null, 0, i, roots.length);
+  });
 }
 
 export async function traverseFrom<C>(
@@ -321,16 +215,18 @@ export async function traverseFrom<C>(
 async function loadOutgoing(
   trx: Kysely<TreeDatabase>,
 ): Promise<Map<string, string[]>> {
-  const edges = await trx.selectFrom("edges").selectAll().execute();
+  const allNodes = await trx.selectFrom("nodes").selectAll().execute();
 
   const out = new Map<string, string[]>();
-  for (const { parent_id, child_id } of edges) {
-    let arr = out.get(parent_id);
-    if (!arr) {
-      arr = [];
-      out.set(parent_id, arr);
+  for (const { id, parent } of allNodes) {
+    if (parent) {
+      let arr = out.get(parent);
+      if (!arr) {
+        arr = [];
+        out.set(parent, arr);
+      }
+      arr.push(id);
     }
-    arr.push(child_id);
   }
   return out;
 }

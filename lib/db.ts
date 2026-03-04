@@ -9,10 +9,14 @@ export interface ArcanumDB {
   heads: {
     id: string;
   };
-  state: {
+  state_diffs: {
     checkpoint: string;
     app: string;
     key: string;
     value: string;
-  }
+  };
+}
+
+export interface StateView {
+  id: string;
 }
