@@ -4,9 +4,12 @@ import { assertEquals, assertExists, assertRejects } from "@std/assert";
 import {
   addChild,
   addNode,
+  createCheckpoint,
   createTreeTables,
   dropTreeTables,
+  get,
   getHead,
+  getMany,
   getNode,
   getParent,
   nodes,
@@ -14,9 +17,10 @@ import {
   topologicalSort,
   traverse,
   traverseFrom,
-} from "../lib/dag_sqlite.ts";
+  traverseState,
+} from "../svc/store.ts";
 import { DenoSqliteDialect } from "../lib/db_adapter.ts";
-import type { TreeDatabase } from "../lib/dag_sqlite.ts";
+import type { TreeDatabase } from "../svc/store.ts";
 
 function createTestDb(): Kysely<TreeDatabase> {
   const db = new Database(":memory:");
@@ -25,22 +29,26 @@ function createTestDb(): Kysely<TreeDatabase> {
   });
 }
 
-Deno.test("createTreeTables creates nodes, edges, and heads tables", async () => {
+Deno.test("createTreeTables creates nodes, checkpoints, kv_writes, and heads tables", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
   const nodesTable = await sql<{ name: string }>`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'nodes'
   `.execute(db);
-  const edgesTable = await sql<{ name: string }>`
-    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'edges'
+  const checkpointsTable = await sql<{ name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'checkpoints'
+  `.execute(db);
+  const kvWritesTable = await sql<{ name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'kv_writes'
   `.execute(db);
   const headsTable = await sql<{ name: string }>`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'heads'
   `.execute(db);
 
   assertEquals(nodesTable.rows.length, 1);
-  assertEquals(edgesTable.rows.length, 1);
+  assertEquals(checkpointsTable.rows.length, 1);
+  assertEquals(kvWritesTable.rows.length, 1);
   assertEquals(headsTable.rows.length, 1);
 
   await db.destroy();
@@ -52,7 +60,7 @@ Deno.test("dropTreeTables removes tables", async () => {
   await dropTreeTables(db);
 
   const tables = await sql<{ name: string }>`
-    SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nodes', 'edges', 'heads')
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nodes', 'checkpoints', 'kv_writes', 'heads')
   `.execute(db);
 
   assertEquals(tables.rows.length, 0);
@@ -94,10 +102,11 @@ Deno.test("getNode returns false for non-existent node", async () => {
   await db.destroy();
 });
 
-Deno.test("setHead creates node and sets head", async () => {
+Deno.test("setHead sets head", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
 
   const head = await getHead(db);
@@ -126,6 +135,7 @@ Deno.test("addChild creates nodes and edge", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
   await addChild(db, "a", "b");
 
@@ -142,6 +152,7 @@ Deno.test("addChild is idempotent", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
   await addChild(db, "a", "b");
   await addChild(db, "a", "b");
@@ -156,6 +167,7 @@ Deno.test("addChild rejects adding second parent to child", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
   await addChild(db, "a", "b");
 
@@ -175,6 +187,7 @@ Deno.test("nodes returns all node ids", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
   await addNode(db, "b");
   await addNode(db, "c");
@@ -189,13 +202,14 @@ Deno.test("heads returns the head node", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
   await addChild(db, "a", "b");
   await addChild(db, "a", "c");
   await addChild(db, "b", "d");
 
-  const headIds = await heads(db);
-  assertEquals(headIds, ["a"]);
+  const headId = await getHead(db);
+  assertEquals(headId, "a");
 
   await db.destroy();
 });
@@ -204,6 +218,7 @@ Deno.test("topologicalSort returns dependencies first", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
   await addChild(db, "a", "b");
   await addChild(db, "a", "c");
@@ -221,6 +236,7 @@ Deno.test("traverse visits nodes depth-first", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
   await addChild(db, "a", "b");
   await addChild(db, "a", "c");
@@ -241,6 +257,7 @@ Deno.test("traverse provides correct state", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
   await addChild(db, "a", "b");
   await addChild(db, "a", "c");
@@ -271,6 +288,7 @@ Deno.test("traverse tracks index and total correctly", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
   await addChild(db, "a", "b");
   await addChild(db, "a", "c");
@@ -296,6 +314,7 @@ Deno.test("handles tree with branching", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
   await addChild(db, "a", "b");
   await addChild(db, "a", "c");
@@ -321,6 +340,7 @@ Deno.test("traverseFrom visits descendants of specific node", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
   await addChild(db, "a", "b");
   await addChild(db, "a", "c");
@@ -343,6 +363,7 @@ Deno.test("traverseFrom with context", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
+  await addNode(db, "a");
   await setHead(db, "a");
   await addChild(db, "a", "b");
 
@@ -356,7 +377,7 @@ Deno.test("traverseFrom with context", async () => {
   await db.destroy();
 });
 
-Deno.test("topologicalSort returns empty when no head", async () => {
+Deno.test("topologicalSort returns empty when no root nodes", async () => {
   const db = createTestDb();
   await createTreeTables(db);
 
@@ -386,3 +407,249 @@ async function heads(
     .execute();
   return rows.map((r) => r.id);
 }
+
+Deno.test("addNode with kvDiffs stores writes", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await addNode(db, "e1", undefined, new Map([["foo", "bar"]]));
+
+  const head = await getHead(db);
+  assertEquals(head, "e1");
+
+  const value = await get(db, "foo");
+  assertEquals(value, "bar");
+
+  await db.destroy();
+});
+
+Deno.test("addNode with kvDiffs updates head", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await addNode(db, "e1", undefined, new Map([["a", "1"]]));
+  await addNode(db, "e2", "e1", new Map([["b", "2"]]));
+
+  const head = await getHead(db);
+  assertEquals(head, "e2");
+
+  const a = await get(db, "a");
+  assertEquals(a, "1");
+
+  const b = await get(db, "b");
+  assertEquals(b, "2");
+
+  await db.destroy();
+});
+
+Deno.test("get returns null for non-existent key", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await addNode(db, "e1", undefined, new Map([["foo", "bar"]]));
+
+  const value = await get(db, "nonexistent");
+  assertEquals(value, null);
+
+  await db.destroy();
+});
+
+Deno.test("get reads at specific event", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await addNode(db, "e1", undefined, new Map([["foo", "bar"]]));
+  await addNode(db, "e2", "e1", new Map([["foo", "baz"]]));
+  await addNode(db, "e3", "e2", new Map([["foo", "qux"]]));
+
+  const v1 = await get(db, "foo", "e1");
+  assertEquals(v1, "bar");
+
+  const v2 = await get(db, "foo", "e2");
+  assertEquals(v2, "baz");
+
+  const v3 = await get(db, "foo", "e3");
+  assertEquals(v3, "qux");
+
+  await db.destroy();
+});
+
+Deno.test("get reads current state when no event specified", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await addNode(db, "e1", undefined, new Map([["foo", "bar"]]));
+  await addNode(db, "e2", "e1", new Map([["foo", "baz"]]));
+
+  const value = await get(db, "foo");
+  assertEquals(value, "baz");
+
+  await db.destroy();
+});
+
+Deno.test("getMany returns multiple keys", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await addNode(
+    db,
+    "e1",
+    undefined,
+    new Map([
+      ["foo", "bar"],
+      ["baz", "qux"],
+    ]),
+  );
+
+  const result = await getMany(db, ["foo", "baz", "missing"]);
+  assertEquals(result.get("foo"), "bar");
+  assertEquals(result.get("baz"), "qux");
+  assertEquals(result.get("missing"), null);
+
+  await db.destroy();
+});
+
+Deno.test("createCheckpoint creates checkpoint and updates node", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await addNode(db, "e1", undefined, new Map([["foo", "bar"]]));
+  await addNode(db, "e2", "e1", new Map([["foo", "baz"]]));
+
+  const checkpointId = await createCheckpoint(db, "e2");
+
+  const value = await get(db, "foo", "e2");
+  assertEquals(value, "baz");
+
+  await db.destroy();
+});
+
+Deno.test("createCheckpoint on event with no prior checkpoint", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await addNode(db, "e1", undefined, new Map([["foo", "bar"]]));
+
+  const checkpointId = await createCheckpoint(db, "e1");
+  assertExists(checkpointId);
+
+  const value = await get(db, "foo", "e1");
+  assertEquals(value, "bar");
+
+  await db.destroy();
+});
+
+Deno.test("get reads value from checkpoint + diffs", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await addNode(
+    db,
+    "e1",
+    undefined,
+    new Map([
+      ["a", "1"],
+      ["b", "2"],
+    ]),
+  );
+
+  await createCheckpoint(db, "e1");
+
+  await addNode(db, "e2", "e1", new Map([["b", "3"]]));
+  await addNode(db, "e3", "e2", new Map([["c", "4"]]));
+
+  const a = await get(db, "a", "e3");
+  assertEquals(a, "1");
+
+  const b = await get(db, "b", "e3");
+  assertEquals(b, "3");
+
+  const c = await get(db, "c", "e3");
+  assertEquals(c, "4");
+
+  await db.destroy();
+});
+
+Deno.test("traverseState yields all state at event", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await addNode(
+    db,
+    "e1",
+    undefined,
+    new Map([
+      ["foo", "bar"],
+      ["baz", "qux"],
+    ]),
+  );
+
+  await createCheckpoint(db, "e1");
+
+  await addNode(
+    db,
+    "e2",
+    "e1",
+    new Map([
+      ["foo", "updated"],
+      ["new", "key"],
+    ]),
+  );
+
+  const state: Array<[string, string | null]> = [];
+  for await (const [key, value] of traverseState(db, "e2")) {
+    state.push([key, value]);
+  }
+
+  const stateMap = new Map(state);
+  assertEquals(stateMap.get("foo"), "updated");
+  assertEquals(stateMap.get("baz"), "qux");
+  assertEquals(stateMap.get("new"), "key");
+
+  await db.destroy();
+});
+
+Deno.test("KV writes at different branches are isolated", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await addNode(db, "e1", undefined, new Map([["foo", "bar"]]));
+  await createCheckpoint(db, "e1");
+
+  await addNode(db, "e2", "e1", new Map([["foo", "branch1"]]));
+  await addNode(db, "e3", "e1", new Map([["foo", "branch2"]]));
+
+  const v2 = await get(db, "foo", "e2");
+  assertEquals(v2, "branch1");
+
+  const v3 = await get(db, "foo", "e3");
+  assertEquals(v3, "branch2");
+
+  await db.destroy();
+});
+
+Deno.test("delete key with null value", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  await addNode(db, "e1", undefined, new Map([["foo", "bar"]]));
+  await addNode(db, "e2", "e1", new Map([["foo", null]]));
+
+  const v1 = await get(db, "foo", "e1");
+  assertEquals(v1, "bar");
+
+  const v2 = await get(db, "foo", "e2");
+  assertEquals(v2, null);
+
+  await db.destroy();
+});
+
+Deno.test("get returns null when no events exist", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+
+  const value = await get(db, "foo");
+  assertEquals(value, null);
+
+  await db.destroy();
+});
