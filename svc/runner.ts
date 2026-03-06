@@ -1,19 +1,33 @@
 // Runner module handles running a given event and returning a transaction
 // as well as any state changes and so on
 
-import type { Event, Transaction, TransactionId } from "./events.ts";
-import type { ResultAsync } from "neverthrow";
+import type { Result } from "neverthrow";
 import { ok } from "neverthrow";
+import { ProgramId } from "../lib/types.ts";
+import {TraversalState} from "./store.ts"
 
-class Runner {
-  constructor() {}
-  spawn() {
+export default class Runner {
+  workers: Worker[] = [];
+
+  constructor() {
+    // hello world
   }
-  async executeRoot(
+
+  spawn(id: ProgramId) {
+    // spawn
+    const worker = new Worker(new URL("./worker.ts", import.meta.url).href, {
+      type: "module",
+    });
+    this.workers.push(worker);
+  }
+
+  async execute(
     id: TransactionId,
     root: Event,
-  ): ResultAsync<Transaction, Error> {
-    // execute a root event
+    state: 
+  ): Promise<Result<Transaction, Error>> {
+    // execute an event
+    this.spawn();
 
     return ok({
       id,

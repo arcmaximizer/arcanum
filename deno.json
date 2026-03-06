@@ -1,6 +1,6 @@
 {
   "tasks": {
-    "dev": "deno run --watch main.ts"
+    "dev": "deno run --node-modules-dir --allow-env --allow-read --allow-write --allow-ffi --watch main.ts"
   },
   "imports": {
     "@db/sqlite": "jsr:@db/sqlite@^0.13.0",
@@ -9,5 +9,11 @@
     "@types/deno": "npm:@types/deno@^2.5.0",
     "kysely": "npm:kysely@^0.28.11",
     "neverthrow": "npm:neverthrow@8.2.0"
+  },
+  "compilerOptions": {
+    "strict": true,
+    "noImplicitAny": true,
+    "noUncheckedIndexedAccess": true,
+    "useUnknownInCatchVariables": true
   }
 }

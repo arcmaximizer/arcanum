@@ -1,9 +1,16 @@
 {
   "compilerOptions": {
     "strict": true,
-    "lib": ["deno.window", "deno.worker", "esnext", "node"],
-    "allowImportingTsExtensions": true,
-    "target": "esnext",
-    "moduleResolution": "nodenext"
-  }
+    "noImplicitAny": true,
+    "noUncheckedIndexedAccess": true,
+    "useUnknownInCatchVariables": true,
+    "allowJs": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "target": "ESNext",
+    "lib": ["ESNext"],
+    "types": ["deno"]
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
 }

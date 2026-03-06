@@ -4,7 +4,7 @@ import { DenoSqliteDialect } from "./lib/db_adapter.ts";
 import { createTreeTables } from "./svc/store.ts";
 import type { TreeDatabase } from "./svc/store.ts";
 
-const dbPath = "./arcanum.db";
+const dbPath = process.env.DB_FILE ?? "./arcanum.db";
 
 class Arcanum {
   #db: Kysely<TreeDatabase>;
