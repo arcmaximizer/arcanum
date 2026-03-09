@@ -1,8 +1,10 @@
 {
   "tasks": {
-    "dev": "deno run --node-modules-dir --allow-env --allow-read --allow-write --allow-ffi --watch main.ts"
+    "dev": "deno run --node-modules-dir --allow-env --allow-read --allow-write --allow-ffi --watch main.ts",
+    "tui": "deno run --allow-all cmd/arcanum_tui.ts"
   },
   "imports": {
+    "@cliffy/keypress": "jsr:@cliffy/keypress",
     "@db/sqlite": "jsr:@db/sqlite@^0.13.0",
     "@sha1n/dagraph": "npm:@sha1n/dagraph@^0.3.1",
     "@std/assert": "jsr:@std/assert@1",

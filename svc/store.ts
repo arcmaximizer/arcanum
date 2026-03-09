@@ -88,6 +88,17 @@ export async function down(db: Kysely<any>): Promise<void> {
 export const createTreeTables = up;
 export const dropTreeTables = down;
 
+export async function initTreeTables(db: Kysely<any>): Promise<void> {
+  try {
+    await up(db);
+  } catch (e) {
+    if (e instanceof Error && e.message.includes("already exists")) {
+      return;
+    }
+    throw e;
+  }
+}
+
 export function addContention(eventId: string): void {
   const current = contentionCache.get(eventId) ?? 0;
   contentionCache.set(eventId, current + 1);

@@ -1,6 +1,9 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@cliffy/internal@1.0.0": "1.0.0",
+    "jsr:@cliffy/keycode@1.0.0": "1.0.0",
+    "jsr:@cliffy/keypress@*": "1.0.0",
     "jsr:@db/sqlite@0.13": "0.13.0",
     "jsr:@denosaurs/plug@1": "1.1.0",
     "jsr:@std/assert@1": "1.0.18",
@@ -8,7 +11,7 @@
     "jsr:@std/fmt@1": "1.0.9",
     "jsr:@std/fs@1": "1.0.22",
     "jsr:@std/internal@^1.0.12": "1.0.12",
-    "jsr:@std/path@1": "1.0.9",
+    "jsr:@std/path@1": "1.1.4",
     "jsr:@std/path@1.0": "1.0.9",
     "jsr:@std/path@^1.1.4": "1.1.4",
     "npm:@sha1n/dagraph@~0.3.1": "0.3.1",
@@ -17,6 +20,19 @@
     "npm:neverthrow@8.2.0": "8.2.0"
   },
   "jsr": {
+    "@cliffy/internal@1.0.0": {
+      "integrity": "1e17ccbcd5420093c0a93e5b3827bbdc9abac5195bacf187edc44665e54bdde6"
+    },
+    "@cliffy/keycode@1.0.0": {
+      "integrity": "755dbf007be110dcb5625f87eb61b362b6a0ca6835453af03ebd3b34d399cf14"
+    },
+    "@cliffy/keypress@1.0.0": {
+      "integrity": "dd2e33484bea5fedf9bad5ed4aa0248a53373427d70cb94de4aad3052f948cea",
+      "dependencies": [
+        "jsr:@cliffy/internal",
+        "jsr:@cliffy/keycode"
+      ]
+    },
     "@db/sqlite@0.13.0": {
       "integrity": "4545c635e0b3d4ddfdc0f2240f932f24b8ad0178e9c2e3a0f9403e7b18ae2fb5",
       "dependencies": [
@@ -89,6 +105,7 @@
   },
   "workspace": {
     "dependencies": [
+      "jsr:@cliffy/keypress@*",
       "jsr:@db/sqlite@0.13",
       "jsr:@std/assert@1",
       "npm:@sha1n/dagraph@~0.3.1",
