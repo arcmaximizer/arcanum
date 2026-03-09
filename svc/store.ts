@@ -4,6 +4,7 @@ export interface TreeDatabase {
   nodes: {
     id: string;
     parent: string | undefined;
+    base: string | undefined;
     checkpoint_id: string | undefined;
   };
   checkpoints: {
@@ -23,6 +24,12 @@ export interface TreeDatabase {
   };
 }
 
+type State = Map<string, string | null>;
+
+const computedStateCache = new Map<string, State>();
+const refCountCache = new Map<string, number>();
+const contentionCache = new Map<string, number>();
+
 export interface TraversalState {
   readonly parent: string | null;
   readonly depth: number;
@@ -41,6 +48,7 @@ export async function up(db: Kysely<any>): Promise<void> {
     .createTable("nodes")
     .addColumn("id", "text", (col) => col.notNull())
     .addColumn("parent", "text")
+    .addColumn("base", "text")
     .addColumn("checkpoint_id", "text")
     .addPrimaryKeyConstraint("pk_nodes", ["id"])
     .execute();
@@ -80,11 +88,61 @@ export async function down(db: Kysely<any>): Promise<void> {
 export const createTreeTables = up;
 export const dropTreeTables = down;
 
+export function addContention(eventId: string): void {
+  const current = contentionCache.get(eventId) ?? 0;
+  contentionCache.set(eventId, current + 1);
+}
+
+export function removeContention(eventId: string): void {
+  const current = contentionCache.get(eventId) ?? 0;
+  if (current <= 1) {
+    contentionCache.delete(eventId);
+  } else {
+    contentionCache.set(eventId, current - 1);
+  }
+  tryEvict(eventId);
+}
+
+export function cacheState(eventId: string, state: State): void {
+  computedStateCache.set(eventId, state);
+}
+
+export function getCachedState(eventId: string): State | undefined {
+  return computedStateCache.get(eventId);
+}
+
+function tryEvict(eventId: string): void {
+  const refCount = refCountCache.get(eventId) ?? 0;
+  const contention = contentionCache.get(eventId) ?? 0;
+
+  if (refCount === 0 && contention === 0) {
+    computedStateCache.delete(eventId);
+    refCountCache.delete(eventId);
+    contentionCache.delete(eventId);
+  }
+}
+
+export function incrementRefCount(eventId: string): void {
+  const current = refCountCache.get(eventId) ?? 0;
+  refCountCache.set(eventId, current + 1);
+}
+
+export function decrementRefCount(eventId: string): void {
+  const current = refCountCache.get(eventId) ?? 0;
+  if (current <= 1) {
+    refCountCache.delete(eventId);
+  } else {
+    refCountCache.set(eventId, current - 1);
+  }
+  tryEvict(eventId);
+}
+
 export async function addNode(
   trx: Kysely<TreeDatabase>,
   id: string,
   parent?: string,
   kvDiffs?: Map<string, string | null>,
+  base?: string,
 ): Promise<void> {
   const parentNode = parent
     ? await trx
@@ -98,7 +156,7 @@ export async function addNode(
 
   await trx
     .insertInto("nodes")
-    .values({ id, parent, checkpoint_id: checkpointId })
+    .values({ id, parent, base: base ?? parent, checkpoint_id: checkpointId })
     .onConflict((oc) => oc.column("id").doNothing())
     .execute();
 
@@ -184,22 +242,38 @@ export async function getChildren(
 
 export async function getHead(
   trx: Kysely<TreeDatabase>,
+  treeId?: string,
 ): Promise<string | null> {
   const row = await trx
     .selectFrom("heads")
     .select("event_id")
-    .where("id", "=", "main")
+    .where("id", "=", treeId ?? "main")
     .executeTakeFirst();
   return row?.event_id ?? null;
+}
+
+export async function getHeads(
+  trx: Kysely<TreeDatabase>,
+): Promise<Map<string, string>> {
+  const rows = await trx
+    .selectFrom("heads")
+    .selectAll()
+    .execute();
+  const result = new Map<string, string>();
+  for (const row of rows) {
+    result.set(row.id, row.event_id);
+  }
+  return result;
 }
 
 export async function setHead(
   trx: Kysely<TreeDatabase>,
   eventId: string,
+  treeId?: string,
 ): Promise<void> {
   await trx
     .insertInto("heads")
-    .values({ id: "main", event_id: eventId })
+    .values({ id: treeId ?? "main", event_id: eventId })
     .onConflict((oc) => oc.column("id").doUpdateSet({ event_id: eventId }))
     .execute();
 }
@@ -272,6 +346,11 @@ export async function get(
   const targetEventId = eventId ?? (await getHead(trx));
   if (!targetEventId) return null;
 
+  const cachedState = computedStateCache.get(targetEventId);
+  if (cachedState) {
+    return cachedState.get(key) ?? null;
+  }
+
   const event = await trx
     .selectFrom("nodes")
     .select("checkpoint_id")
@@ -314,7 +393,7 @@ export async function get(
   }
 
   const latestWrite = writes[writes.length - 1];
-  return latestWrite.value;
+  return latestWrite?.value ?? null;
 }
 
 export async function getMany(
