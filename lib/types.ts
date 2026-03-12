@@ -1,4 +1,4 @@
-import { crypto } from "crypto";
+import { getRandomValues } from "crypto";
 
 declare const __brand: unique symbol;
 export type Brand<B> = { [__brand]: B };
@@ -18,22 +18,26 @@ export type Serializable =
   | Map<Serializable, Serializable>
   | Set<Serializable>;
 
-// Program IDs are in the format developer/program_id
-// e.g. arcmaximizer/hello-arc
+/// Program IDs are in the format developer/program_id
+/// e.g. arcmaximizer/hello-arc
 export type ProgramId = Branded<string, "ProgramId">;
-
 export function isProgramId(value: string): value is ProgramId {
   return /^([a-z0-9](?:-?[a-z0-9])*)\/([a-z0-9](?:-?[a-z0-9])*)$/
     .test(value);
 }
 
-export type UUID = Branded<string, "UUID">;
+// SHA-256 hash, often used as a unique identifier for blob data
+export type Hash = Branded<string, "Hash">;
+export function isHash(value: string): value is Hash {
+  return /^[0-9a-f]{64}$/
+    .test(value);
+}
 
+export type UUID = Branded<string, "UUID">;
 export function isUUID(value: string): value is UUID {
   return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/
     .test(value);
 }
-
 export function generateUUIDv7(): string {
   const buf = new Uint8Array(16);
 
@@ -47,7 +51,7 @@ export function generateUUIDv7(): string {
   buf[5] = Number(now & 0xffn);
 
   // random bytes for the rest
-  crypto.getRandomValues(buf.subarray(6));
+  getRandomValues(buf.subarray(6));
 
   // set version (7)
   buf[6] = (buf[6] & 0x0f) | 0x70;
