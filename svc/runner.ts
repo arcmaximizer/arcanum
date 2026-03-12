@@ -3,38 +3,81 @@
 
 import type { Result } from "neverthrow";
 import { ok } from "neverthrow";
-import { ProgramId } from "../lib/types.ts";
-import {TraversalState} from "./store.ts"
+import { Hash, ProgramId, Serializable } from "../lib/types.ts";
+import { TreeStore } from "./store.ts";
+import { PackageStore } from "./packages.ts";
 
+interface EventProposal {
+  from: ProgramId;
+  to: Hash;
+  input: Serializable;
+  base?: string;
+  metadata: Serializable;
+}
+
+interface EventPrecommit extends EventProposal {
+  diffs: Map<string, string>;
+  output?: Serializable;
+  children: EventPrecommit[];
+}
+
+/*
+when it receives a "spawn" request
+- create a contention on the base (basically tell the store "cache the current head's state" in case that another event comes by and gets committed during execution. base = kinda like snapshot time for the event, where the event gets its state)
+- spin up the worker if it wasn't created yet
+- post message to worker, "new event" plus an ID
+- worker's glue code translates this to userspace, calls a function in user app code
+- user app code does stuff, occasionally requests state or spawns new events
+- remove contentions
+- return the "final" event data to the system for a commit later on, plus any return data
+
+when receiving a state get request from a worker:
+- look up the event ID passed (event here means "what event is this worker processing rn")
+- fetch the key at the event's base
+- if the event is already committed, noop but print a warning
+- return the key to the event's base
+
+when receiving a spawn request from a worker:
+- do all the stuff that the spawn function does
+- return control flow to the higher level spawn function
+(recursion !!!)
+*/
 export default class Runner {
-  workers: Worker[] = [];
+  store: TreeStore;
+  packages: PackageStore;
+  transactions: Map<string, Set<string>> = new Map();
+  workers: Map<string, Worker> = new Map();
 
-  constructor() {
-    // hello world
+  constructor(store: TreeStore, packages: PackageStore) {
+    this.store = store;
+    this.packages = packages;
   }
 
-  spawn(id: ProgramId) {
+  spawn(id: ProgramId | Hash) {
     // spawn
-    const worker = new Worker(new URL("./worker.ts", import.meta.url).href, {
+    const worker = new Worker(new URL("./glue.ts", import.meta.url).href, {
       type: "module",
     });
-    this.workers.push(worker);
+    this.workers.set(id, worker);
   }
 
   async execute(
-    id: TransactionId,
-    root: Event,
-    state: 
-  ): Promise<Result<Transaction, Error>> {
+    root: EventProposal,
+  ): Promise<Result<EventPrecommit, Error>> {
+    const head = await this.store.getHead();
+    
+    const resolved: Required<EventProposal> = {
+      ...root,
+      base: 
+    };
+
     // execute an event
-    this.spawn();
+    const exists = this.workers.has(root.to);
 
     return ok({
-      id,
-      root,
-      diffs: [],
-      inputs: [],
-      effects: [],
+      ...root,
+      diffs: new Map(),
+      children: [],
     });
   }
 }
