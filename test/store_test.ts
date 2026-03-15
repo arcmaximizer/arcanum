@@ -28,6 +28,9 @@ Deno.test("createTreeTables creates nodes, checkpoints, kv_writes, and heads tab
   const checkpointsTable = await sql<{ name: string }>`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'checkpoints'
   `.execute(db);
+  const checkpointStateTable = await sql<{ name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'checkpoint_state'
+  `.execute(db);
   const kvWritesTable = await sql<{ name: string }>`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'kv_writes'
   `.execute(db);
@@ -37,6 +40,7 @@ Deno.test("createTreeTables creates nodes, checkpoints, kv_writes, and heads tab
 
   assertEquals(nodesTable.rows.length, 1);
   assertEquals(checkpointsTable.rows.length, 1);
+  assertEquals(checkpointStateTable.rows.length, 1);
   assertEquals(kvWritesTable.rows.length, 1);
   assertEquals(headsTable.rows.length, 1);
 
@@ -49,7 +53,7 @@ Deno.test("dropTreeTables removes tables", async () => {
   await dropTreeTables(db);
 
   const tables = await sql<{ name: string }>`
-    SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nodes', 'checkpoints', 'kv_writes', 'heads')
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nodes', 'checkpoints', 'checkpoint_state', 'kv_writes', 'heads')
   `.execute(db);
 
   assertEquals(tables.rows.length, 0);
@@ -534,8 +538,68 @@ Deno.test("createCheckpoint creates checkpoint and updates node", async () => {
 
   const checkpointId = await store.createCheckpoint("e2");
 
+  const checkpointRows = await db
+    .selectFrom("checkpoint_state")
+    .selectAll()
+    .where("checkpoint_id", "=", checkpointId)
+    .execute();
+
   const value = await store.get("foo", "e2");
   assertEquals(value, "baz");
+  assertEquals(checkpointRows.length, 1);
+  assertEquals(checkpointRows[0]?.key, "foo");
+  assertEquals(checkpointRows[0]?.value, "baz");
+
+  await db.destroy();
+});
+
+Deno.test("checkpoint optimization uses materialized checkpoint state", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode("e1", undefined, new Map([["a", "1"], ["b", "2"]]));
+  await store.addNode("e2", "e1", new Map([["b", "3"], ["c", "4"]]));
+  await store.addNode("e3", "e2", new Map([["d", "5"]]));
+
+  const checkpointId = await store.createCheckpoint("e2");
+
+  store.resetStateBuildStats();
+  const value = await store.get("d", "e3");
+  const stats = store.getStateBuildStats();
+
+  const checkpointRows = await db
+    .selectFrom("checkpoint_state")
+    .selectAll()
+    .where("checkpoint_id", "=", checkpointId)
+    .execute();
+
+  assertEquals(value, "5");
+  assertEquals(checkpointRows.length, 3);
+  assertEquals(stats.checkpointHits, 1);
+  assertEquals(stats.fullRebuilds, 0);
+  assertEquals(stats.lineageEventsApplied, 1);
+
+  await db.destroy();
+});
+
+Deno.test("cache instrumentation reports cache hit after warm read", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode("e1", undefined, new Map([["a", "1"]]));
+
+  store.resetStateBuildStats();
+  assertEquals(await store.get("a", "e1"), "1");
+  const coldStats = store.getStateBuildStats();
+
+  store.resetStateBuildStats();
+  assertEquals(await store.get("a", "e1"), "1");
+  const warmStats = store.getStateBuildStats();
+
+  assertEquals(coldStats.cachedStateHits, 0);
+  assertEquals(warmStats.cachedStateHits, 1);
 
   await db.destroy();
 });
@@ -715,7 +779,7 @@ Deno.test("addNode with base parameter", async () => {
   await createTreeTables(db);
   const store = new SqliteTreeStore(db);
 
-  await store.addNode("a", undefined, new Map([["foo", "bar"]]), "base-a");
+  await store.addNode("a", undefined, new Map([["foo", "bar"]]), undefined, "base-a");
 
   const exists = await store.getNode("a");
   assertEquals(exists, true);

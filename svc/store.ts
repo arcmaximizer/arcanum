@@ -12,11 +12,20 @@ export interface TreeDatabase {
     parent: string | undefined;
     event_id: string;
   };
+  checkpoint_state: {
+    checkpoint_id: string;
+    key: string;
+    value: string | null;
+  };
   kv_writes: {
     key: string;
     event_id: string;
     value: string | null;
     checkpoint_id: string;
+  };
+  kv_reads: {
+    key: string;
+    event_id: string;
   };
   heads: {
     id: string;
@@ -29,6 +38,7 @@ export interface TreeStore {
     id: string,
     parent?: string,
     kvDiffs?: Map<string, string | null>,
+    kvReads?: Set<string>,
     base?: string,
   ): Promise<void>;
   getNode(id: string): Promise<boolean>;
@@ -45,6 +55,15 @@ export interface TreeStore {
     keys: string[],
     eventId?: string,
   ): Promise<Map<string, string | null>>;
+  getReads(eventId: string): Promise<Set<string>>;
+  getCache(): CacheService;
+  getStateBuildStats(): Readonly<{
+    checkpointHits: number;
+    fullRebuilds: number;
+    lineageEventsApplied: number;
+    cachedStateHits: number;
+  }>;
+  resetStateBuildStats(): void;
   traverseState(
     eventId?: string,
   ): AsyncGenerator<[string, string | null], void, unknown>;
@@ -67,6 +86,19 @@ export interface CacheService {
   incrementRefCount(eventId: string): void;
   decrementRefCount(eventId: string): void;
   clear(): void;
+}
+
+interface StateBuildStats {
+  checkpointHits: number;
+  fullRebuilds: number;
+  lineageEventsApplied: number;
+  cachedStateHits: number;
+}
+
+interface CheckpointBaseState {
+  checkpointId: string;
+  eventId: string;
+  state: State;
 }
 
 export class InMemoryCacheService implements CacheService {
@@ -162,12 +194,27 @@ export async function up(db: Kysely<any>): Promise<void> {
     .execute();
 
   await db.schema
+    .createTable("checkpoint_state")
+    .addColumn("checkpoint_id", "text", (col) => col.notNull())
+    .addColumn("key", "text", (col) => col.notNull())
+    .addColumn("value", "text")
+    .addPrimaryKeyConstraint("pk_checkpoint_state", ["checkpoint_id", "key"])
+    .execute();
+
+  await db.schema
     .createTable("kv_writes")
     .addColumn("key", "text", (col) => col.notNull())
     .addColumn("event_id", "text", (col) => col.notNull())
     .addColumn("value", "text")
     .addColumn("checkpoint_id", "text", (col) => col.notNull())
     .addPrimaryKeyConstraint("pk_kv_writes", ["key", "event_id"])
+    .execute();
+
+  await db.schema
+    .createTable("kv_reads")
+    .addColumn("key", "text", (col) => col.notNull())
+    .addColumn("event_id", "text", (col) => col.notNull())
+    .addPrimaryKeyConstraint("pk_kv_reads", ["key", "event_id"])
     .execute();
 
   await db.schema
@@ -181,7 +228,9 @@ export async function up(db: Kysely<any>): Promise<void> {
 export async function down(db: Kysely<any>): Promise<void> {
   await db.schema.dropTable("nodes").execute();
   await db.schema.dropTable("checkpoints").execute();
+  await db.schema.dropTable("checkpoint_state").execute();
   await db.schema.dropTable("kv_writes").execute();
+  await db.schema.dropTable("kv_reads").execute();
   await db.schema.dropTable("heads").execute();
 }
 
@@ -201,6 +250,12 @@ export async function initTreeTables(db: Kysely<any>): Promise<void> {
 
 export class SqliteTreeStore implements TreeStore {
   private readonly cache: CacheService;
+  private readonly stateBuildStats: StateBuildStats = {
+    checkpointHits: 0,
+    fullRebuilds: 0,
+    lineageEventsApplied: 0,
+    cachedStateHits: 0,
+  };
 
   constructor(
     private readonly db: Kysely<TreeDatabase>,
@@ -209,41 +264,78 @@ export class SqliteTreeStore implements TreeStore {
     this.cache = cache ?? new InMemoryCacheService();
   }
 
+  getCache(): CacheService {
+    return this.cache;
+  }
+
+  getStateBuildStats(): Readonly<StateBuildStats> {
+    return { ...this.stateBuildStats };
+  }
+
+  resetStateBuildStats(): void {
+    this.stateBuildStats.checkpointHits = 0;
+    this.stateBuildStats.fullRebuilds = 0;
+    this.stateBuildStats.lineageEventsApplied = 0;
+    this.stateBuildStats.cachedStateHits = 0;
+  }
+
   async addNode(
     id: string,
     parent?: string,
     kvDiffs?: Map<string, string | null>,
+    kvReads?: Set<string>,
     base?: string,
   ): Promise<void> {
-    const parentNode = parent
-      ? await this.db
+    let checkpointId: string | undefined;
+
+    if (parent) {
+      const parentNode = await this.db
         .selectFrom("nodes")
         .select("checkpoint_id")
         .where("id", "=", parent)
-        .executeTakeFirst()
-      : null;
+        .executeTakeFirst();
 
-    let checkpointId: string | undefined = parentNode?.checkpoint_id ??
-      undefined;
+      checkpointId = parentNode?.checkpoint_id;
+    }
 
+    const nodeHasWrites = kvDiffs && kvDiffs.size > 0;
+    
     await this.db
       .insertInto("nodes")
-      .values({ id, parent, base: base ?? parent, checkpoint_id: checkpointId })
+      .values({ 
+        id, 
+        parent, 
+        base: base ?? parent, 
+        checkpoint_id: nodeHasWrites ? undefined : checkpointId 
+      })
       .onConflict((oc) => oc.column("id").doNothing())
       .execute();
 
-    if (kvDiffs && kvDiffs.size > 0) {
-      if (!checkpointId) {
-        checkpointId = await this.createCheckpoint(id);
-      }
+    if (nodeHasWrites) {
+      const newCheckpointId = await this.createCheckpoint(id, checkpointId);
 
+      await this.db
+        .updateTable("nodes")
+        .set({ checkpoint_id: newCheckpointId })
+        .where("id", "=", id)
+        .execute();
+
+      const checkpointIdForWrites = newCheckpointId;
       const writes = Array.from(kvDiffs.entries()).map(([key, value]) => ({
         key,
         event_id: id,
         value,
-        checkpoint_id: checkpointId!,
+        checkpoint_id: checkpointIdForWrites,
       }));
       await this.db.insertInto("kv_writes").values(writes).execute();
+    }
+
+    if (kvReads && kvReads.size > 0) {
+      const reads = Array.from(kvReads).map((key) => ({
+        key,
+        event_id: id,
+      }));
+      await this.db.insertInto("kv_reads").values(reads).execute();
     }
 
     await this.setHead(id, "main");
@@ -336,7 +428,10 @@ export class SqliteTreeStore implements TreeStore {
     return rows.map((r) => r.id);
   }
 
-  async createCheckpoint(eventId: string): Promise<string> {
+  async createCheckpoint(
+    eventId: string,
+    parentCheckpointId?: string,
+  ): Promise<string> {
     const event = await this.db
       .selectFrom("nodes")
       .selectAll()
@@ -351,17 +446,16 @@ export class SqliteTreeStore implements TreeStore {
       return event.checkpoint_id;
     }
 
-    const parentCheckpointId = event.checkpoint_id ?? null;
+    let parentCheckpointEventId: string | null = null;
 
-    const parentCheckpoint = parentCheckpointId
-      ? await this.db
+    if (parentCheckpointId) {
+      const parentCheckpoint = await this.db
         .selectFrom("checkpoints")
         .select("event_id")
         .where("id", "=", parentCheckpointId)
-        .executeTakeFirst()
-      : null;
-
-    const parentEventId = parentCheckpoint?.event_id ?? null;
+        .executeTakeFirst();
+      parentCheckpointEventId = parentCheckpoint?.event_id ?? null;
+    }
 
     const checkpointId = `checkpoint_${eventId}_${Date.now()}`;
 
@@ -370,9 +464,20 @@ export class SqliteTreeStore implements TreeStore {
       .values({
         id: checkpointId,
         parent: parentCheckpointId ?? undefined,
-        event_id: eventId,
+        event_id: parentCheckpointEventId ?? eventId,
       })
       .execute();
+
+    const state = await this.buildStateFromLineage(eventId);
+    const rows = Array.from(state.entries()).map(([key, value]) => ({
+      checkpoint_id: checkpointId,
+      key,
+      value,
+    }));
+
+    if (rows.length > 0) {
+      await this.db.insertInto("checkpoint_state").values(rows).execute();
+    }
 
     await this.db
       .updateTable("nodes")
@@ -383,58 +488,148 @@ export class SqliteTreeStore implements TreeStore {
     return checkpointId;
   }
 
+  private async getLineage(eventId: string): Promise<string[]> {
+    const lineage: string[] = [];
+    let current: string | null = eventId;
+
+    while (current) {
+      lineage.push(current);
+      const row = await this.db
+        .selectFrom("nodes")
+        .select("parent")
+        .where("id", "=", current)
+        .executeTakeFirst();
+      current = row?.parent ?? null;
+    }
+
+    lineage.reverse();
+    return lineage;
+  }
+
+  private async buildStateFromLineage(eventId: string): Promise<State> {
+    const lineage = await this.getLineage(eventId);
+    return await this.applyWritesForLineage(lineage, new Map<string, string | null>());
+  }
+
+  private async getCheckpointBaseState(
+    eventId: string,
+  ): Promise<CheckpointBaseState | null> {
+    const lineage = await this.getLineage(eventId);
+    if (lineage.length === 0) {
+      return null;
+    }
+
+    const nodes = await this.db
+      .selectFrom("nodes")
+      .select(["id", "checkpoint_id"])
+      .where("id", "in", lineage)
+      .execute();
+
+    const checkpointByEvent = new Map(
+      nodes
+        .filter((node) => node.checkpoint_id)
+        .map((node) => [node.id, node.checkpoint_id as string]),
+    );
+
+    for (let index = lineage.length - 1; index >= 0; index -= 1) {
+      const lineageEventId = lineage[index];
+      if (!lineageEventId) {
+        continue;
+      }
+      const checkpointId = checkpointByEvent.get(lineageEventId);
+      if (!checkpointId) {
+        continue;
+      }
+
+      const rows = await this.db
+        .selectFrom("checkpoint_state")
+        .select(["key", "value"])
+        .where("checkpoint_id", "=", checkpointId)
+        .execute();
+
+      const state = new Map<string, string | null>();
+      for (const row of rows) {
+        state.set(row.key, row.value);
+      }
+
+      return { checkpointId, eventId: lineageEventId, state };
+    }
+
+    return null;
+  }
+
+  private async applyWritesForLineage(
+    lineage: string[],
+    initialState: State,
+    startIndex = 0,
+  ): Promise<State> {
+    if (lineage.length === 0 || startIndex >= lineage.length) {
+      return new Map(initialState);
+    }
+
+    const writes = await this.db
+      .selectFrom("kv_writes")
+      .selectAll()
+      .where("event_id", "in", lineage.slice(startIndex))
+      .execute();
+
+    const writesByEvent = new Map<string, Array<{ key: string; value: string | null }>>();
+    for (const write of writes) {
+      const bucket = writesByEvent.get(write.event_id) ?? [];
+      bucket.push({ key: write.key, value: write.value });
+      writesByEvent.set(write.event_id, bucket);
+    }
+
+    const state = new Map(initialState);
+    for (const ancestor of lineage.slice(startIndex)) {
+      const eventWrites = writesByEvent.get(ancestor) ?? [];
+      this.stateBuildStats.lineageEventsApplied += 1;
+      for (const write of eventWrites) {
+        if (write.value === null) {
+          state.delete(write.key);
+        } else {
+          state.set(write.key, write.value);
+        }
+      }
+    }
+
+    return state;
+  }
+
+  private async buildState(eventId: string): Promise<State> {
+    const lineage = await this.getLineage(eventId);
+    if (lineage.length === 0) return new Map<string, string | null>();
+
+    const checkpointBase = await this.getCheckpointBaseState(eventId);
+    if (!checkpointBase) {
+      this.stateBuildStats.fullRebuilds += 1;
+      return await this.applyWritesForLineage(lineage, new Map<string, string | null>());
+    }
+
+    this.stateBuildStats.checkpointHits += 1;
+    const startIndex = lineage.indexOf(checkpointBase.eventId) + 1;
+    return await this.applyWritesForLineage(
+      lineage,
+      checkpointBase.state,
+      startIndex,
+    );
+  }
+
   async get(key: string, eventId?: string): Promise<string | null> {
     const targetEventId = eventId ?? await this.getHead("main");
     if (!targetEventId) return null;
 
     const cachedState = this.cache.getCachedState(targetEventId);
     if (cachedState) {
+      this.stateBuildStats.cachedStateHits += 1;
       return cachedState.get(key) ?? null;
     }
 
-    const event = await this.db
-      .selectFrom("nodes")
-      .select("checkpoint_id")
-      .where("id", "=", targetEventId)
-      .executeTakeFirst();
+    const state = await this.buildState(targetEventId);
 
-    if (!event) return null;
+    this.cache.cacheState(targetEventId, state);
 
-    const checkpointId = event.checkpoint_id;
-    if (!checkpointId) return null;
-
-    const checkpoint = await this.db
-      .selectFrom("checkpoints")
-      .selectAll()
-      .where("id", "=", checkpointId)
-      .executeTakeFirst();
-
-    if (!checkpoint) return null;
-
-    const checkpointEventId = checkpoint.event_id;
-
-    const writes = await this.db
-      .selectFrom("kv_writes")
-      .selectAll()
-      .where("key", "=", key)
-      .where("event_id", ">", checkpointEventId)
-      .where("event_id", "<=", targetEventId)
-      .orderBy("event_id", "asc")
-      .execute();
-
-    if (writes.length === 0) {
-      const priorWrite = await this.db
-        .selectFrom("kv_writes")
-        .selectAll()
-        .where("key", "=", key)
-        .where("event_id", "<=", checkpointEventId)
-        .orderBy("event_id", "desc")
-        .executeTakeFirst();
-      return priorWrite?.value ?? null;
-    }
-
-    const latestWrite = writes[writes.length - 1];
-    return latestWrite?.value ?? null;
+    return state.get(key) ?? null;
   }
 
   async getMany(
@@ -450,46 +645,25 @@ export class SqliteTreeStore implements TreeStore {
     return result;
   }
 
+  async getReads(eventId: string): Promise<Set<string>> {
+    const rows = await this.db
+      .selectFrom("kv_reads")
+      .select("key")
+      .where("event_id", "=", eventId)
+      .execute();
+
+    return new Set(rows.map((r) => r.key));
+  }
+
   async *traverseState(
     eventId?: string,
   ): AsyncGenerator<[string, string | null], void, unknown> {
     const targetEventId = eventId ?? await this.getHead("main");
     if (!targetEventId) return;
 
-    const event = await this.db
-      .selectFrom("nodes")
-      .select("checkpoint_id")
-      .where("id", "=", targetEventId)
-      .executeTakeFirst();
+    const state = await this.buildState(targetEventId);
 
-    if (!event || !event.checkpoint_id) return;
-
-    const checkpoint = await this.db
-      .selectFrom("checkpoints")
-      .select("event_id")
-      .where("id", "=", event.checkpoint_id)
-      .executeTakeFirst();
-
-    if (!checkpoint) return;
-
-    const checkpointEventId = checkpoint.event_id;
-
-    const allWrites = await this.db
-      .selectFrom("kv_writes")
-      .selectAll()
-      .where("event_id", "<=", targetEventId)
-      .orderBy("event_id", "asc")
-      .execute();
-
-    const state = new Map<string, string | null>();
-
-    for (const write of allWrites) {
-      if (write.value === null) {
-        state.delete(write.key);
-      } else {
-        state.set(write.key, write.value);
-      }
-    }
+    this.cache.cacheState(targetEventId, state);
 
     for (const [key, value] of state) {
       yield [key, value];

@@ -21,6 +21,12 @@ interface EventPrecommit extends EventProposal {
   children: EventPrecommit[];
 }
 
+export interface RunnerLikeWorker {
+  terminate?(): void;
+}
+
+export type WorkerFactory = (id: ProgramId | Hash) => RunnerLikeWorker;
+
 /*
 when it receives a "spawn" request
 - create a contention on the base (basically tell the store "cache the current head's state" in case that another event comes by and gets committed during execution. base = kinda like snapshot time for the event, where the event gets its state)
@@ -46,18 +52,23 @@ export default class Runner {
   store: TreeStore;
   packages: PackageStore;
   transactions: Map<string, Set<string>> = new Map();
-  workers: Map<string, Worker> = new Map();
+  workers: Map<string, RunnerLikeWorker> = new Map();
+  private readonly workerFactory: WorkerFactory;
 
-  constructor(store: TreeStore, packages: PackageStore) {
+  constructor(
+    store: TreeStore,
+    packages: PackageStore,
+    workerFactory?: WorkerFactory,
+  ) {
     this.store = store;
     this.packages = packages;
+    this.workerFactory = workerFactory ?? (() => new Worker(new URL("./glue.ts", import.meta.url).href, {
+      type: "module",
+    }));
   }
 
   spawn(id: ProgramId | Hash) {
-    // spawn
-    const worker = new Worker(new URL("./glue.ts", import.meta.url).href, {
-      type: "module",
-    });
+    const worker = this.workerFactory(id);
     this.workers.set(id, worker);
   }
 
@@ -65,19 +76,33 @@ export default class Runner {
     root: EventProposal,
   ): Promise<Result<EventPrecommit, Error>> {
     const head = await this.store.getHead();
-    
-    const resolved: Required<EventProposal> = {
+
+    const resolved: EventProposal = {
       ...root,
-      base: 
+      base: root.base ?? head ?? undefined,
     };
 
-    // execute an event
-    const exists = this.workers.has(root.to);
+    if (!this.workers.has(resolved.to)) {
+      this.spawn(resolved.to);
+    }
 
-    return ok({
-      ...root,
-      diffs: new Map(),
-      children: [],
-    });
+    if (resolved.base) {
+      this.store.getCache().addContention(resolved.base);
+      this.store.getCache().incrementRefCount(resolved.base);
+      await this.store.traverseState(resolved.base).next();
+      this.store.getCache().decrementRefCount(resolved.base);
+    }
+
+    try {
+      return ok({
+        ...resolved,
+        diffs: new Map(),
+        children: [],
+      });
+    } finally {
+      if (resolved.base) {
+        this.store.getCache().removeContention(resolved.base);
+      }
+    }
   }
 }
