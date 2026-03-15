@@ -88,6 +88,29 @@ GET requests, or as responses from events to other runtime extensions, _however_
 all these instances are tracked within Arcanum such that one can always replay
 an event execution against the state.
 
+### Checkpoint Creation Sequence
+*This section was written primarily by OpenCode.*
+
+The store implementation uses a specific sequence for checkpoint creation to
+ensure correctness:
+
+1. **Insert the node** with `checkpoint_id: undefined` (since it will have
+   writes)
+2. **Insert the event's writes** into `kv_writes` with a temporary checkpoint ID
+3. **Create the checkpoint** which materializes the state from the lineage
+4. **Update the node** with the new checkpoint ID
+5. **Update the writes** with the correct checkpoint ID
+
+This sequence ensures that:
+
+- The checkpoint includes the event's own writes (not just ancestor writes)
+- The checkpoint state is materialized correctly
+- No race conditions occur during concurrent reads
+
+The implementation differs from a naive approach where writes are inserted after
+checkpoint creation, which would result in checkpoints missing the event's own
+writes.
+
 ## Derived Events
 
 A derived event is another event created by the execution of an event. In layman
@@ -124,9 +147,84 @@ code: <uuid>
 
 The `code` field is a UUID pointing to code inside the cache.
 
+## Traversal and Tree Operations
+*This section was written primarily by OpenCode.*
+
+The store implements efficient tree traversal and topological sorting:
+
+### Iterative Traversal
+
+- `traverse` and `traverseFrom` methods use an iterative stack-based approach
+- This prevents stack overflow for deep event trees
+- Children are processed in deterministic order (sorted by ID)
+
+### Topological Sort
+
+- Returns events in dependency order (parents before children)
+- Root nodes are processed in sorted order for determinism
+- Uses depth-first search with explicit stack to avoid recursion limits
+
+### Checkpoint Optimization
+
+- When reading state, the store finds the closest checkpoint in the lineage
+- Only applies writes from events after the checkpoint (not from the root)
+- This significantly reduces computation for long event chains
+
 ## Runtime extensions
 
 Runtime extensions are special apps that do not have persistent state tracked by
 the system. They are used as glue code for conducting I/O.
 
 A runtime extension should be as minimal as possible.
+
+## Database Schema Implementation
+*This section was written primarily by OpenCode.*
+
+The store implementation uses SQLite with Kysely to persist the event tree.
+Here's how the mental model maps to the actual database schema:
+
+### Nodes Table
+
+- `id`: Unique identifier for the event (matches mental model)
+- `parent`: Parent event ID (matches mental model)
+- `base`: The base event used for state reconstruction (defaults to parent or
+  own ID for root nodes)
+- `checkpoint_id`: ID of the checkpoint materializing this event's state
+- `from`: App identifier where the event originated (matches mental model)
+- `to`: App identifier where the event is sent (matches mental model)
+- `index`: Incrementing counter (matches mental model)
+- `data`: JSON-serialized input data sent to the app (matches mental model)
+- `returns`: JSON-serialized output data returned by the app (matches mental
+  model)
+
+### Key-Value Tables
+
+- `kv_writes`: Stores key-value writes per event, linked to a checkpoint
+- `kv_reads`: Stores keys read per event
+- `checkpoint_state`: Materialized state at checkpoint events
+
+### Derived Events & Effects
+
+- `derived_events`: Maps origin events to derived events (many-to-many)
+- `effects`: Stores side effects for events
+
+### Checkpoint System
+
+- Checkpoints materialize the full state at a specific event
+- Checkpoints form a chain via parent relationships
+- The `event_id` in the checkpoints table references the parent checkpoint's
+  event ID (not the current event), enabling efficient state reconstruction
+
+### Base Field Clarification
+
+- The `base` field is used for state reconstruction optimization
+- For root nodes (no parent), `base` defaults to the node's own ID
+- This ensures every event has a defined base for consistent state rebuilding
+
+### Cache Service
+
+- Implements contention-based eviction strategy
+- `addContention(eventId)`: Marks that an event is being processed (creates a state snapshot)
+- `removeContention(eventId)`: Marks that event processing is complete
+- **State eviction**: Occurs when contention count reaches zero
+- This ensures state is preserved during event processing and evicted when no longer needed

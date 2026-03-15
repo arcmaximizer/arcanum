@@ -8,7 +8,7 @@ import {
   TreeStore,
 } from "../svc/store.ts";
 import { DenoSqliteDialect } from "../lib/db_adapter.ts";
-import type { TreeDatabase, CacheService } from "../svc/store.ts";
+import type { CacheService, TreeDatabase } from "../svc/store.ts";
 import { InMemoryCacheService } from "../svc/store.ts";
 
 function createTestDb(): Kysely<TreeDatabase> {
@@ -578,7 +578,8 @@ Deno.test("checkpoint optimization uses materialized checkpoint state", async ()
   assertEquals(checkpointRows.length, 3);
   assertEquals(stats.checkpointHits, 1);
   assertEquals(stats.fullRebuilds, 0);
-  assertEquals(stats.lineageEventsApplied, 1);
+  // Since e3 has its own checkpoint (created by addNode), no lineage events need to be applied
+  assertEquals(stats.lineageEventsApplied, 0);
 
   await db.destroy();
 });
@@ -779,7 +780,13 @@ Deno.test("addNode with base parameter", async () => {
   await createTreeTables(db);
   const store = new SqliteTreeStore(db);
 
-  await store.addNode("a", undefined, new Map([["foo", "bar"]]), undefined, "base-a");
+  await store.addNode(
+    "a",
+    undefined,
+    new Map([["foo", "bar"]]),
+    undefined,
+    "base-a",
+  );
 
   const exists = await store.getNode("a");
   assertEquals(exists, true);
@@ -843,28 +850,122 @@ Deno.test("cache service - cacheState and getCachedState", () => {
   assertEquals(notCached, undefined);
 });
 
-Deno.test("cache service - ref counting and eviction", () => {
-  const cache: CacheService = new InMemoryCacheService();
 
-  const state = new Map([["foo", "bar"]]);
-  cache.cacheState("event1", state);
-  cache.incrementRefCount("event1");
-  cache.incrementRefCount("event1");
-  cache.decrementRefCount("event1");
-  cache.decrementRefCount("event1");
-
-  const cached = cache.getCachedState("event1");
-  assertEquals(cached, undefined);
-});
 
 Deno.test("cache service - clear", () => {
   const cache: CacheService = new InMemoryCacheService();
 
   cache.cacheState("event1", new Map([["foo", "bar"]]));
   cache.addContention("event1");
-  cache.incrementRefCount("event1");
 
   cache.clear();
 
   assertEquals(cache.getCachedState("event1"), undefined);
+});
+
+Deno.test("addNode stores event fields (from, to, index, data, returns)", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode(
+    "e1",
+    undefined,
+    new Map([["foo", "bar"]]),
+    undefined,
+    undefined,
+    "app-from",
+    "app-to",
+    1,
+    { input: "data" },
+    { output: "result" },
+  );
+
+  const details = await store.getNodeDetails("e1");
+  assertExists(details);
+  assertEquals(details.from, "app-from");
+  assertEquals(details.to, "app-to");
+  assertEquals(details.index, 1);
+  assertEquals(details.data, { input: "data" });
+  assertEquals(details.returns, { output: "result" });
+
+  await db.destroy();
+});
+
+Deno.test("addNode stores derived events", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode(
+    "e1",
+    undefined,
+    new Map([["foo", "bar"]]),
+    undefined,
+    undefined,
+    "app-from",
+    "app-to",
+    1,
+    { input: "data" },
+    { output: "result" },
+    ["e2", "e3"],
+  );
+
+  const derivedEvents = await db.selectFrom("derived_events").selectAll()
+    .execute();
+  assertEquals(derivedEvents.length, 2);
+  const de1 = derivedEvents[0];
+  const de2 = derivedEvents[1];
+  assertExists(de1);
+  assertExists(de2);
+  assertEquals(de1.origin_event_id, "e1");
+  assertEquals(de1.derived_event_id, "e2");
+  assertEquals(de2.origin_event_id, "e1");
+  assertEquals(de2.derived_event_id, "e3");
+
+  await db.destroy();
+});
+
+Deno.test("addNode stores effects", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode(
+    "e1",
+    undefined,
+    new Map([["foo", "bar"]]),
+    undefined,
+    undefined,
+    "app-from",
+    "app-to",
+    1,
+    { input: "data" },
+    { output: "result" },
+    undefined,
+    [{ type: "http", url: "https://example.com" }],
+  );
+
+  const effects = await db.selectFrom("effects").selectAll().execute();
+  assertEquals(effects.length, 1);
+  const effect = effects[0];
+  assertExists(effect);
+  assertEquals(effect.event_id, "e1");
+  assertEquals(JSON.parse(effect.effect_data), {
+    type: "http",
+    url: "https://example.com",
+  });
+
+  await db.destroy();
+});
+
+Deno.test("getNodeDetails returns null for non-existent node", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  const details = await store.getNodeDetails("nonexistent");
+  assertEquals(details, null);
+
+  await db.destroy();
 });

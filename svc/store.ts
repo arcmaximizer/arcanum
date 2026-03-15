@@ -6,6 +6,11 @@ export interface TreeDatabase {
     parent: string | undefined;
     base: string | undefined;
     checkpoint_id: string | undefined;
+    from: string | undefined;
+    to: string | undefined;
+    index: number | undefined;
+    data: string | undefined;
+    returns: string | undefined;
   };
   checkpoints: {
     id: string;
@@ -31,6 +36,14 @@ export interface TreeDatabase {
     id: string;
     event_id: string;
   };
+  derived_events: {
+    origin_event_id: string;
+    derived_event_id: string;
+  };
+  effects: {
+    event_id: string;
+    effect_data: string;
+  };
 }
 
 export interface TreeStore {
@@ -40,8 +53,28 @@ export interface TreeStore {
     kvDiffs?: Map<string, string | null>,
     kvReads?: Set<string>,
     base?: string,
+    from?: string,
+    to?: string,
+    index?: number,
+    data?: any,
+    returns?: any,
+    derived?: string[],
+    effects?: any[],
   ): Promise<void>;
   getNode(id: string): Promise<boolean>;
+  getNodeDetails(id: string): Promise<
+    {
+      id: string;
+      parent: string | undefined;
+      base: string | undefined;
+      checkpoint_id: string | undefined;
+      from: string | undefined;
+      to: string | undefined;
+      index: number | undefined;
+      data: any;
+      returns: any;
+    } | null
+  >;
   addChild(parent: string, child: string): Promise<void>;
   getParent(childId: string): Promise<string | null>;
   getChildren(parentId: string): Promise<string[]>;
@@ -83,8 +116,6 @@ export interface CacheService {
   removeContention(eventId: string): void;
   cacheState(eventId: string, state: State): void;
   getCachedState(eventId: string): State | undefined;
-  incrementRefCount(eventId: string): void;
-  decrementRefCount(eventId: string): void;
   clear(): void;
 }
 
@@ -103,7 +134,6 @@ interface CheckpointBaseState {
 
 export class InMemoryCacheService implements CacheService {
   private computedStateCache = new Map<string, State>();
-  private refCountCache = new Map<string, number>();
   private contentionCache = new Map<string, number>();
 
   addContention(eventId: string): void {
@@ -130,34 +160,16 @@ export class InMemoryCacheService implements CacheService {
   }
 
   private tryEvict(eventId: string): void {
-    const refCount = this.refCountCache.get(eventId) ?? 0;
     const contention = this.contentionCache.get(eventId) ?? 0;
 
-    if (refCount === 0 && contention === 0) {
+    if (contention === 0) {
       this.computedStateCache.delete(eventId);
-      this.refCountCache.delete(eventId);
       this.contentionCache.delete(eventId);
     }
   }
 
-  incrementRefCount(eventId: string): void {
-    const current = this.refCountCache.get(eventId) ?? 0;
-    this.refCountCache.set(eventId, current + 1);
-  }
-
-  decrementRefCount(eventId: string): void {
-    const current = this.refCountCache.get(eventId) ?? 0;
-    if (current <= 1) {
-      this.refCountCache.delete(eventId);
-    } else {
-      this.refCountCache.set(eventId, current - 1);
-    }
-    this.tryEvict(eventId);
-  }
-
   clear(): void {
     this.computedStateCache.clear();
-    this.refCountCache.clear();
     this.contentionCache.clear();
   }
 }
@@ -182,6 +194,11 @@ export async function up(db: Kysely<any>): Promise<void> {
     .addColumn("parent", "text")
     .addColumn("base", "text")
     .addColumn("checkpoint_id", "text")
+    .addColumn("from", "text")
+    .addColumn("to", "text")
+    .addColumn("index", "integer")
+    .addColumn("data", "text")
+    .addColumn("returns", "text")
     .addPrimaryKeyConstraint("pk_nodes", ["id"])
     .execute();
 
@@ -223,6 +240,23 @@ export async function up(db: Kysely<any>): Promise<void> {
     .addColumn("event_id", "text", (col) => col.notNull())
     .addPrimaryKeyConstraint("pk_heads", ["id"])
     .execute();
+
+  await db.schema
+    .createTable("derived_events")
+    .addColumn("origin_event_id", "text", (col) => col.notNull())
+    .addColumn("derived_event_id", "text", (col) => col.notNull())
+    .addPrimaryKeyConstraint("pk_derived_events", [
+      "origin_event_id",
+      "derived_event_id",
+    ])
+    .execute();
+
+  await db.schema
+    .createTable("effects")
+    .addColumn("event_id", "text", (col) => col.notNull())
+    .addColumn("effect_data", "text", (col) => col.notNull())
+    .addPrimaryKeyConstraint("pk_effects", ["event_id"])
+    .execute();
 }
 
 export async function down(db: Kysely<any>): Promise<void> {
@@ -232,6 +266,8 @@ export async function down(db: Kysely<any>): Promise<void> {
   await db.schema.dropTable("kv_writes").execute();
   await db.schema.dropTable("kv_reads").execute();
   await db.schema.dropTable("heads").execute();
+  await db.schema.dropTable("derived_events").execute();
+  await db.schema.dropTable("effects").execute();
 }
 
 export const createTreeTables = up;
@@ -285,6 +321,13 @@ export class SqliteTreeStore implements TreeStore {
     kvDiffs?: Map<string, string | null>,
     kvReads?: Set<string>,
     base?: string,
+    from?: string,
+    to?: string,
+    index?: number,
+    data?: any,
+    returns?: any,
+    derived?: string[],
+    effects?: any[],
   ): Promise<void> {
     let checkpointId: string | undefined;
 
@@ -299,19 +342,35 @@ export class SqliteTreeStore implements TreeStore {
     }
 
     const nodeHasWrites = kvDiffs && kvDiffs.size > 0;
-    
+
     await this.db
       .insertInto("nodes")
-      .values({ 
-        id, 
-        parent, 
-        base: base ?? parent, 
-        checkpoint_id: nodeHasWrites ? undefined : checkpointId 
+      .values({
+        id,
+        parent,
+        base: base ?? parent ?? id,
+        checkpoint_id: nodeHasWrites ? undefined : checkpointId,
+        from,
+        to,
+        index,
+        data: data !== undefined ? JSON.stringify(data) : undefined,
+        returns: returns !== undefined ? JSON.stringify(returns) : undefined,
       })
       .onConflict((oc) => oc.column("id").doNothing())
       .execute();
 
     if (nodeHasWrites) {
+      // Insert writes first so they are included in checkpoint state
+      // We don't know the checkpoint ID yet, so we'll update it later
+      const writes = Array.from(kvDiffs.entries()).map(([key, value]) => ({
+        key,
+        event_id: id,
+        value,
+        checkpoint_id: "", // Will be updated after checkpoint creation
+      }));
+      await this.db.insertInto("kv_writes").values(writes).execute();
+
+      // Now create checkpoint with the writes already in the database
       const newCheckpointId = await this.createCheckpoint(id, checkpointId);
 
       await this.db
@@ -320,14 +379,12 @@ export class SqliteTreeStore implements TreeStore {
         .where("id", "=", id)
         .execute();
 
-      const checkpointIdForWrites = newCheckpointId;
-      const writes = Array.from(kvDiffs.entries()).map(([key, value]) => ({
-        key,
-        event_id: id,
-        value,
-        checkpoint_id: checkpointIdForWrites,
-      }));
-      await this.db.insertInto("kv_writes").values(writes).execute();
+      // Update the checkpoint_id in kv_writes
+      await this.db
+        .updateTable("kv_writes")
+        .set({ checkpoint_id: newCheckpointId })
+        .where("event_id", "=", id)
+        .execute();
     }
 
     if (kvReads && kvReads.size > 0) {
@@ -336,6 +393,23 @@ export class SqliteTreeStore implements TreeStore {
         event_id: id,
       }));
       await this.db.insertInto("kv_reads").values(reads).execute();
+    }
+
+    if (derived && derived.length > 0) {
+      const derivedEvents = derived.map((derivedId) => ({
+        origin_event_id: id,
+        derived_event_id: derivedId,
+      }));
+      await this.db.insertInto("derived_events").values(derivedEvents)
+        .execute();
+    }
+
+    if (effects && effects.length > 0) {
+      const effectRows = effects.map((effect) => ({
+        event_id: id,
+        effect_data: JSON.stringify(effect),
+      }));
+      await this.db.insertInto("effects").values(effectRows).execute();
     }
 
     await this.setHead(id, "main");
@@ -348,6 +422,38 @@ export class SqliteTreeStore implements TreeStore {
       .where("id", "=", id)
       .executeTakeFirst();
     return row !== undefined;
+  }
+
+  async getNodeDetails(id: string): Promise<
+    {
+      id: string;
+      parent: string | undefined;
+      base: string | undefined;
+      checkpoint_id: string | undefined;
+      from: string | undefined;
+      to: string | undefined;
+      index: number | undefined;
+      data: any;
+      returns: any;
+    } | null
+  > {
+    const row = await this.db
+      .selectFrom("nodes")
+      .selectAll()
+      .where("id", "=", id)
+      .executeTakeFirst();
+    if (!row) return null;
+    return {
+      id: row.id,
+      parent: row.parent,
+      base: row.base,
+      checkpoint_id: row.checkpoint_id,
+      from: row.from,
+      to: row.to,
+      index: row.index,
+      data: row.data ? JSON.parse(row.data) : undefined,
+      returns: row.returns ? JSON.parse(row.returns) : undefined,
+    };
   }
 
   async addChild(parent: string, child: string): Promise<void> {
@@ -508,7 +614,10 @@ export class SqliteTreeStore implements TreeStore {
 
   private async buildStateFromLineage(eventId: string): Promise<State> {
     const lineage = await this.getLineage(eventId);
-    return await this.applyWritesForLineage(lineage, new Map<string, string | null>());
+    return await this.applyWritesForLineage(
+      lineage,
+      new Map<string, string | null>(),
+    );
   }
 
   private async getCheckpointBaseState(
@@ -573,7 +682,10 @@ export class SqliteTreeStore implements TreeStore {
       .where("event_id", "in", lineage.slice(startIndex))
       .execute();
 
-    const writesByEvent = new Map<string, Array<{ key: string; value: string | null }>>();
+    const writesByEvent = new Map<
+      string,
+      Array<{ key: string; value: string | null }>
+    >();
     for (const write of writes) {
       const bucket = writesByEvent.get(write.event_id) ?? [];
       bucket.push({ key: write.key, value: write.value });
@@ -603,7 +715,10 @@ export class SqliteTreeStore implements TreeStore {
     const checkpointBase = await this.getCheckpointBaseState(eventId);
     if (!checkpointBase) {
       this.stateBuildStats.fullRebuilds += 1;
-      return await this.applyWritesForLineage(lineage, new Map<string, string | null>());
+      return await this.applyWritesForLineage(
+        lineage,
+        new Map<string, string | null>(),
+      );
     }
 
     this.stateBuildStats.checkpointHits += 1;
@@ -674,6 +789,9 @@ export class SqliteTreeStore implements TreeStore {
     const roots = await this.getRoots();
     if (roots.length === 0) return [];
 
+    // Sort roots to make the order deterministic
+    roots.sort();
+
     const sorted: string[] = [];
     const visited = new Set<string>();
 
@@ -684,6 +802,8 @@ export class SqliteTreeStore implements TreeStore {
       sorted.push(nodeId);
 
       const children = await this.getChildren(nodeId);
+      // Sort children to make the order deterministic
+      children.sort();
       for (const child of children) {
         await traverse(child);
       }
@@ -714,24 +834,33 @@ export class SqliteTreeStore implements TreeStore {
 
     const outgoing = await this.loadOutgoing();
 
-    const visitNode = (
-      id: string,
-      parent: string | null,
-      depth: number,
-      index: number,
-      total: number,
-    ): void => {
+    // Use stack for iterative traversal
+    // Each item: [id, parent, depth, index, total]
+    const stack: Array<[string, string | null, number, number, number]> = [];
+
+    // Push roots onto stack
+    for (let i = roots.length - 1; i >= 0; i--) {
+      const root = roots[i];
+      if (root) {
+        stack.push([root, null, 0, i, roots.length]);
+      }
+    }
+
+    while (stack.length > 0) {
+      const item = stack.pop();
+      if (!item) break;
+      const [id, parent, depth, index, total] = item;
       visitor(id, { parent, depth, index, total }, context);
 
       const children = outgoing.get(id) ?? [];
-      children.forEach((childId, i) => {
-        visitNode(childId, id, depth + 1, i, children.length);
-      });
-    };
-
-    roots.forEach((root, i) => {
-      visitNode(root, null, 0, i, roots.length);
-    });
+      // Push children in reverse order so they are processed in correct order
+      for (let i = children.length - 1; i >= 0; i--) {
+        const child = children[i];
+        if (child) {
+          stack.push([child, id, depth + 1, i, children.length]);
+        }
+      }
+    }
   }
 
   async traverseFrom<C>(
@@ -743,22 +872,25 @@ export class SqliteTreeStore implements TreeStore {
 
     const childCount = (outgoing.get(nodeId) ?? []).length;
 
-    const visitNode = (
-      id: string,
-      parent: string | null,
-      depth: number,
-      index: number,
-      total: number,
-    ): void => {
+    // Use stack for iterative traversal
+    const stack: Array<[string, string | null, number, number, number]> = [];
+    stack.push([nodeId, null, 0, 0, childCount]);
+
+    while (stack.length > 0) {
+      const item = stack.pop();
+      if (!item) break;
+      const [id, parent, depth, index, total] = item;
       visitor(id, { parent, depth, index, total }, context);
 
       const children = outgoing.get(id) ?? [];
-      children.forEach((childId, i) => {
-        visitNode(childId, id, depth + 1, i, children.length);
-      });
-    };
-
-    visitNode(nodeId, null, 0, 0, childCount);
+      // Push children in reverse order so they are processed in correct order
+      for (let i = children.length - 1; i >= 0; i--) {
+        const child = children[i];
+        if (child) {
+          stack.push([child, id, depth + 1, i, children.length]);
+        }
+      }
+    }
   }
 
   private async loadOutgoing(): Promise<Map<string, string[]>> {

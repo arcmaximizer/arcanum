@@ -62,9 +62,11 @@ export default class Runner {
   ) {
     this.store = store;
     this.packages = packages;
-    this.workerFactory = workerFactory ?? (() => new Worker(new URL("./glue.ts", import.meta.url).href, {
-      type: "module",
-    }));
+    this.workerFactory = workerFactory ??
+      (() =>
+        new Worker(new URL("./glue.ts", import.meta.url).href, {
+          type: "module",
+        }));
   }
 
   spawn(id: ProgramId | Hash) {
@@ -88,9 +90,7 @@ export default class Runner {
 
     if (resolved.base) {
       this.store.getCache().addContention(resolved.base);
-      this.store.getCache().incrementRefCount(resolved.base);
       await this.store.traverseState(resolved.base).next();
-      this.store.getCache().decrementRefCount(resolved.base);
     }
 
     try {

@@ -1,11 +1,15 @@
 import { assertEquals, assertExists } from "@std/assert";
 import Runner from "../svc/runner.ts";
-import type { CacheService, TreeStore, TreeVisitor, TraversalState } from "../svc/store.ts";
+import type {
+  CacheService,
+  TraversalState,
+  TreeStore,
+  TreeVisitor,
+} from "../svc/store.ts";
 
 class FakeCache implements CacheService {
   readonly states = new Map<string, Map<string, string | null>>();
   readonly contentions = new Map<string, number>();
-  readonly refCounts = new Map<string, number>();
 
   addContention(eventId: string): void {
     this.contentions.set(eventId, (this.contentions.get(eventId) ?? 0) + 1);
@@ -28,23 +32,9 @@ class FakeCache implements CacheService {
     return this.states.get(eventId);
   }
 
-  incrementRefCount(eventId: string): void {
-    this.refCounts.set(eventId, (this.refCounts.get(eventId) ?? 0) + 1);
-  }
-
-  decrementRefCount(eventId: string): void {
-    const next = (this.refCounts.get(eventId) ?? 0) - 1;
-    if (next <= 0) {
-      this.refCounts.delete(eventId);
-    } else {
-      this.refCounts.set(eventId, next);
-    }
-  }
-
   clear(): void {
     this.states.clear();
     this.contentions.clear();
-    this.refCounts.clear();
   }
 }
 
@@ -54,31 +44,81 @@ class FakeStore implements TreeStore {
   head: string | null = "head-1";
 
   async addNode(): Promise<void> {}
-  async getNode(): Promise<boolean> { return false; }
+  async getNode(): Promise<boolean> {
+    return false;
+  }
   async addChild(): Promise<void> {}
-  async getParent(): Promise<string | null> { return null; }
-  async getChildren(): Promise<string[]> { return []; }
-  async getHead(): Promise<string | null> { return this.head; }
-  async getHeads(): Promise<Map<string, string>> { return new Map(); }
+  async getParent(): Promise<string | null> {
+    return null;
+  }
+  async getChildren(): Promise<string[]> {
+    return [];
+  }
+  async getHead(): Promise<string | null> {
+    return this.head;
+  }
+  async getHeads(): Promise<Map<string, string>> {
+    return new Map();
+  }
   async setHead(): Promise<void> {}
-  async nodes(): Promise<string[]> { return []; }
-  async createCheckpoint(): Promise<string> { return "checkpoint"; }
-  async get(): Promise<string | null> { return null; }
-  async getMany(): Promise<Map<string, string | null>> { return new Map(); }
-  async getReads(): Promise<Set<string>> { return new Set(); }
-  getCache(): CacheService { return this.cache; }
-  getStateBuildStats() { return { checkpointHits: 0, fullRebuilds: 0, lineageEventsApplied: 0, cachedStateHits: 0 } as const; }
+  async nodes(): Promise<string[]> {
+    return [];
+  }
+  async createCheckpoint(): Promise<string> {
+    return "checkpoint";
+  }
+  async get(): Promise<string | null> {
+    return null;
+  }
+  async getNodeDetails(): Promise<{
+    id: string;
+    parent: string | undefined;
+    base: string | undefined;
+    checkpoint_id: string | undefined;
+    from: string | undefined;
+    to: string | undefined;
+    index: number | undefined;
+    data: any;
+    returns: any;
+  } | null> {
+    return null;
+  }
+  async getMany(): Promise<Map<string, string | null>> {
+    return new Map();
+  }
+  async getReads(): Promise<Set<string>> {
+    return new Set();
+  }
+  getCache(): CacheService {
+    return this.cache;
+  }
+  getStateBuildStats() {
+    return {
+      checkpointHits: 0,
+      fullRebuilds: 0,
+      lineageEventsApplied: 0,
+      cachedStateHits: 0,
+    } as const;
+  }
   resetStateBuildStats(): void {}
-  async *traverseState(eventId?: string): AsyncGenerator<[string, string | null], void, unknown> {
+  async *traverseState(
+    eventId?: string,
+  ): AsyncGenerator<[string, string | null], void, unknown> {
     if (eventId) {
       this.traversedBases.push(eventId);
       this.cache.cacheState(eventId, new Map([["warm", "1"]]));
     }
     yield ["warm", "1"];
   }
-  async topologicalSort(): Promise<string[]> { return []; }
+  async topologicalSort(): Promise<string[]> {
+    return [];
+  }
   async traverse<C>(_visitor: TreeVisitor<C>, _context: C): Promise<void> {}
-  async traverseFrom<C>(_nodeId: string, _visitor: TreeVisitor<C>, _context: C): Promise<void> {}
+  async traverseFrom<C>(
+    _nodeId: string,
+    _visitor: TreeVisitor<C>,
+    _context: C,
+  ): Promise<void> {}
 }
 
 Deno.test("runner execute warms base cache and releases contention", async () => {
@@ -105,7 +145,6 @@ Deno.test("runner execute warms base cache and releases contention", async () =>
   assertEquals(store.traversedBases, ["head-1"]);
   assertExists(store.cache.getCachedState("head-1"));
   assertEquals(store.cache.contentions.get("head-1"), undefined);
-  assertEquals(store.cache.refCounts.get("head-1"), undefined);
 });
 
 Deno.test("runner execute respects explicit base instead of current head", async () => {
