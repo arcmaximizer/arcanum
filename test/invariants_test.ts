@@ -542,8 +542,6 @@ Deno.test("contention - multiple contentions require multiple removals", async (
   await db.destroy();
 });
 
-
-
 Deno.test("checkpoint + diffs - traverseState yields same as get", async () => {
   const db = createTestDb();
   await createTreeTables(db);

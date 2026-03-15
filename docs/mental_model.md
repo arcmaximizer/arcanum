@@ -27,7 +27,8 @@ current head.
 
 ## Anatomy of an Event
 
-An event goes through multiple stages before being appended to the event tree.
+An event goes through multiple stages before being appended to an app's event
+tree.
 
 1. Proposal
 2. Execution
@@ -89,7 +90,8 @@ all these instances are tracked within Arcanum such that one can always replay
 an event execution against the state.
 
 ### Checkpoint Creation Sequence
-*This section was written primarily by OpenCode.*
+
+_This section was written primarily by OpenCode._
 
 The store implementation uses a specific sequence for checkpoint creation to
 ensure correctness:
@@ -147,29 +149,6 @@ code: <uuid>
 
 The `code` field is a UUID pointing to code inside the cache.
 
-## Traversal and Tree Operations
-*This section was written primarily by OpenCode.*
-
-The store implements efficient tree traversal and topological sorting:
-
-### Iterative Traversal
-
-- `traverse` and `traverseFrom` methods use an iterative stack-based approach
-- This prevents stack overflow for deep event trees
-- Children are processed in deterministic order (sorted by ID)
-
-### Topological Sort
-
-- Returns events in dependency order (parents before children)
-- Root nodes are processed in sorted order for determinism
-- Uses depth-first search with explicit stack to avoid recursion limits
-
-### Checkpoint Optimization
-
-- When reading state, the store finds the closest checkpoint in the lineage
-- Only applies writes from events after the checkpoint (not from the root)
-- This significantly reduces computation for long event chains
-
 ## Runtime extensions
 
 Runtime extensions are special apps that do not have persistent state tracked by
@@ -178,7 +157,8 @@ the system. They are used as glue code for conducting I/O.
 A runtime extension should be as minimal as possible.
 
 ## Database Schema Implementation
-*This section was written primarily by OpenCode.*
+
+_This section was written primarily by OpenCode._
 
 The store implementation uses SQLite with Kysely to persist the event tree.
 Here's how the mental model maps to the actual database schema:
@@ -224,7 +204,9 @@ Here's how the mental model maps to the actual database schema:
 ### Cache Service
 
 - Implements contention-based eviction strategy
-- `addContention(eventId)`: Marks that an event is being processed (creates a state snapshot)
+- `addContention(eventId)`: Marks that an event is being processed (creates a
+  state snapshot)
 - `removeContention(eventId)`: Marks that event processing is complete
 - **State eviction**: Occurs when contention count reaches zero
-- This ensures state is preserved during event processing and evicted when no longer needed
+- This ensures state is preserved during event processing and evicted when no
+  longer needed

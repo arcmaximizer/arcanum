@@ -497,11 +497,12 @@ export class SqliteTreeStore implements TreeStore {
     return rows.map((r) => r.id);
   }
 
-  async getHead(treeId: string): Promise<string | null> {
+  async getHead(treeId?: string): Promise<string | null> {
+    const id = treeId ?? "main";
     const row = await this.db
       .selectFrom("heads")
       .select("event_id")
-      .where("id", "=", treeId)
+      .where("id", "=", id)
       .executeTakeFirst();
     return row?.event_id ?? null;
   }
@@ -518,7 +519,7 @@ export class SqliteTreeStore implements TreeStore {
     return result;
   }
 
-  async setHead(eventId: string, treeId: string): Promise<void> {
+  async setHead(eventId: string, treeId: string = "main"): Promise<void> {
     await this.db
       .insertInto("heads")
       .values({ id: treeId, event_id: eventId })

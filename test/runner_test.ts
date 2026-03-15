@@ -70,17 +70,19 @@ class FakeStore implements TreeStore {
   async get(): Promise<string | null> {
     return null;
   }
-  async getNodeDetails(): Promise<{
-    id: string;
-    parent: string | undefined;
-    base: string | undefined;
-    checkpoint_id: string | undefined;
-    from: string | undefined;
-    to: string | undefined;
-    index: number | undefined;
-    data: any;
-    returns: any;
-  } | null> {
+  async getNodeDetails(): Promise<
+    {
+      id: string;
+      parent: string | undefined;
+      base: string | undefined;
+      checkpoint_id: string | undefined;
+      from: string | undefined;
+      to: string | undefined;
+      index: number | undefined;
+      data: any;
+      returns: any;
+    } | null
+  > {
     return null;
   }
   async getMany(): Promise<Map<string, string | null>> {

@@ -850,8 +850,6 @@ Deno.test("cache service - cacheState and getCachedState", () => {
   assertEquals(notCached, undefined);
 });
 
-
-
 Deno.test("cache service - clear", () => {
   const cache: CacheService = new InMemoryCacheService();
 

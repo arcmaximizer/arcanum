@@ -16,6 +16,8 @@
     "jsr:@std/path@^1.1.4": "1.1.4",
     "npm:@sha1n/dagraph@~0.3.1": "0.3.1",
     "npm:@types/deno@^2.5.0": "2.5.0",
+    "npm:fast-check@^3.15.0": "3.23.2",
+    "npm:fast-check@^3.23.2": "3.23.2",
     "npm:kysely@~0.28.11": "0.28.11",
     "npm:neverthrow@8.2.0": "8.2.0"
   },
@@ -93,6 +95,12 @@
     "@types/deno@2.5.0": {
       "integrity": "sha512-g8JS38vmc0S87jKsFzre+0ZyMOUDHPVokEJymSCRlL57h6f/FdKPWBXgdFh3Z8Ees9sz11qt9VWELU9Y9ZkiVw=="
     },
+    "fast-check@3.23.2": {
+      "integrity": "sha512-h5+1OzzfCC3Ef7VbtKdcv7zsstUQwUDlYpUTvjeUsJAssPgLn7QzbboPtL5ro04Mq0rPOsMzl7q5hIbRs2wD1A==",
+      "dependencies": [
+        "pure-rand"
+      ]
+    },
     "kysely@0.28.11": {
       "integrity": "sha512-zpGIFg0HuoC893rIjYX1BETkVWdDnzTzF5e0kWXJFg5lE0k1/LfNWBejrcnOFu8Q2Rfq/hTDTU7XLUM8QOrpzg=="
     },
@@ -101,6 +109,9 @@
       "optionalDependencies": [
         "@rollup/rollup-linux-x64-gnu"
       ]
+    },
+    "pure-rand@6.1.0": {
+      "integrity": "sha512-bVWawvoZoBYpp6yIoQtQXHZjmz35RSVHnUOTefl8Vcjr8snTPY1wnpSPMWekcFwbxI6gtmT7rSYPFvz71ldiOA=="
     }
   },
   "workspace": {
@@ -110,6 +121,7 @@
       "jsr:@std/assert@1",
       "npm:@sha1n/dagraph@~0.3.1",
       "npm:@types/deno@^2.5.0",
+      "npm:fast-check@^3.15.0",
       "npm:kysely@~0.28.11",
       "npm:neverthrow@8.2.0"
     ]
