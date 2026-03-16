@@ -11,6 +11,7 @@
     "jsr:@std/fmt@1": "1.0.9",
     "jsr:@std/fs@1": "1.0.22",
     "jsr:@std/internal@^1.0.12": "1.0.12",
+    "jsr:@std/media-types@^1.1.0": "1.1.0",
     "jsr:@std/path@1": "1.1.4",
     "jsr:@std/path@1.0": "1.0.9",
     "jsr:@std/path@^1.1.4": "1.1.4",
@@ -73,6 +74,9 @@
     "@std/internal@1.0.12": {
       "integrity": "972a634fd5bc34b242024402972cd5143eac68d8dffaca5eaa4dba30ce17b027"
     },
+    "@std/media-types@1.1.0": {
+      "integrity": "c9d093f0c05c3512932b330e3cc1fe1d627b301db33a4c2c2185c02471d6eaa4"
+    },
     "@std/path@1.0.9": {
       "integrity": "260a49f11edd3db93dd38350bf9cd1b4d1366afa98e81b86167b4e3dd750129e"
     },
@@ -119,6 +123,7 @@
       "jsr:@cliffy/keypress@*",
       "jsr:@db/sqlite@0.13",
       "jsr:@std/assert@1",
+      "jsr:@std/media-types@^1.1.0",
       "npm:@sha1n/dagraph@~0.3.1",
       "npm:@types/deno@^2.5.0",
       "npm:fast-check@^3.15.0",
