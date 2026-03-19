@@ -9,6 +9,8 @@
     "@sha1n/dagraph": "npm:@sha1n/dagraph@^0.3.1",
     "@std/assert": "jsr:@std/assert@1",
     "@std/media-types": "jsr:@std/media-types@^1.1.0",
+    "@std/path": "jsr:@std/path@^1.1.4",
+    "@std/tar": "jsr:@std/tar@^0.1.10",
     "@types/deno": "npm:@types/deno@^2.5.0",
     "fast-check": "npm:fast-check@^3.15.0",
     "kysely": "npm:kysely@^0.28.11",

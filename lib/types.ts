@@ -1,4 +1,4 @@
-import { getRandomValues } from "crypto";
+import { getRandomValues } from "node:crypto";
 
 declare const __brand: unique symbol;
 export type Brand<B> = { [__brand]: B };

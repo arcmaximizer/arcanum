@@ -63,7 +63,7 @@ export default class Runner {
     this.store = store;
     this.packages = packages;
     this.workerFactory = workerFactory ??
-      (() =>
+      ((id) =>
         new Worker(new URL("./glue.ts", import.meta.url).href, {
           type: "module",
         }));
