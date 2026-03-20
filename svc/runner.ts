@@ -94,7 +94,10 @@ export default class Runner {
     if (!head) throw new Error("No head found in store");
 
     const base = root.base ?? head;
-    const proposal = { ...root, base } as EventProposal & { base: string; moduleUrl?: string };
+    const proposal = { ...root, base } as EventProposal & {
+      base: string;
+      moduleUrl?: string;
+    };
     if (!proposal.moduleUrl) {
       proposal.moduleUrl = this.resolveModuleUrl(proposal.to);
     }
@@ -247,7 +250,10 @@ export default class Runner {
   private setupHandlers(ipc: HostIPC, rootId: string): void {
     // Derived event call from worker
     ipc.on("call", async (body) => {
-      const proposal = body as EventProposal & { base: string; moduleUrl?: string };
+      const proposal = body as EventProposal & {
+        base: string;
+        moduleUrl?: string;
+      };
       if (!proposal.moduleUrl) {
         proposal.moduleUrl = this.resolveModuleUrl(proposal.to);
       }
