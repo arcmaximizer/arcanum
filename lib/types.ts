@@ -65,9 +65,9 @@ export function generateUUIDv7(): string {
   getRandomValues(buf.subarray(6));
 
   // set version (7)
-  buf[6] = (buf[6] & 0x0f) | 0x70;
+  buf[6] = (buf[6]! & 0x0f) | 0x70;
   // set variant (10xxxxxx)
-  buf[8] = (buf[8] & 0x3f) | 0x80;
+  buf[8] = (buf[8]! & 0x3f) | 0x80;
 
   const hex = [...buf].map((b) => b.toString(16).padStart(2, "0")).join("");
 
