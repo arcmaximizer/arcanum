@@ -69,45 +69,73 @@ Deno.test("runner: simple event returns output", async () => {
 
   assertEquals(result.output, { message: "hello", from: "app/a" });
   assertEquals(typeof result.id, "string");
+  assertEquals(result.id.length, 36); // UUID format
   assertEquals(result.base, "root-1");
 });
 
-Deno.test("runner: explicit base overrides head", async () => {
+Deno.test("runner: explicit base reads state from base, not head", async () => {
   const store = await makeStore();
+  // root-1 is the head, has no state
   await store.addNode("root-1");
+  await store.setHead("root-1");
+  // snap-1 has different state (addNode sets head to snap-1, but the explicit
+  // base means the runner uses snap-1 regardless of head)
   await store.addNode(
     "snap-1",
     undefined,
-    new Map([["x", JSON.stringify(42)]]),
+    new Map([["color", JSON.stringify("blue")]]),
   );
-  await store.setHead("root-1");
 
-  const runner = makeRunner(store);
-
-  const result = await runner.execute({
-    from: "app/a" as any,
-    to: "hello" as any,
-    input: null,
-    metadata: null,
-    base: "snap-1",
-  });
-
-  assertEquals(result.base, "snap-1");
-});
-
-Deno.test("runner: worker reads state via ctx.get", async () => {
-  const store = await makeStore();
-  await seed(store);
   const runner = makeRunner(store);
 
   const result = await runner.execute({
     from: "app/a" as any,
     to: "reader" as any,
-    input: { key: "greeting" },
+    input: { key: "color" },
+    metadata: null,
+    base: "snap-1",
+  });
+
+  assertEquals(result.base, "snap-1");
+  // If it read from head (root-1), color would be undefined
+  assertEquals(result.output, { key: "color", value: "blue" });
+});
+
+Deno.test("runner: base is captured before execution, not affected by head change", async () => {
+  const store = await makeStore();
+  // root-1 has state: name = "old"
+  await store.addNode(
+    "root-1",
+    undefined,
+    new Map([["name", JSON.stringify("old")]]),
+  );
+  // root-2 has state: name = "new"
+  await store.addNode(
+    "root-2",
+    undefined,
+    new Map([["name", JSON.stringify("new")]]),
+  );
+  // Set head to root-1 (addNode sets head to the new node, so we override)
+  await store.setHead("root-1");
+  assertEquals(await store.getHead(), "root-1");
+
+  const runner = makeRunner(store, 500);
+
+  // Start execution — base is resolved to "root-1" (current head) immediately
+  const p = runner.execute({
+    from: "app/a" as any,
+    to: "slow_reader" as any,
+    input: { key: "name", delay: 100 },
     metadata: null,
   });
 
-  assertEquals(result.output, { key: "greeting", value: "world" });
+  // Change head while the worker is sleeping
+  await store.setHead("root-2");
+
+  // The worker's ctx.get should still read from root-1's state, not root-2's
+  const result = await p;
+  assertEquals(result.base, "root-1");
+  assertEquals(result.output, { key: "name", value: "old" });
 });
 
 Deno.test("runner: worker reads undefined for missing key", async () => {
@@ -143,7 +171,7 @@ Deno.test("runner: worker error propagates", async () => {
   );
 });
 
-Deno.test("runner: timeout abandons hanging event", async () => {
+Deno.test("runner: timeout releases contention and rejects", async () => {
   const store = await makeStore();
   await seed(store);
   const runner = makeRunner(store, 200);
@@ -159,6 +187,9 @@ Deno.test("runner: timeout abandons hanging event", async () => {
     Error,
     "timed out",
   );
+
+  // Contention must be released even on timeout
+  assertEquals((store.getCache() as any).contentionCache.size, 0);
 });
 
 Deno.test("runner: derived event via ctx.call", async () => {
