@@ -1,12 +1,12 @@
 import type { IPCMethodHandler, IPCOptions } from "./types.ts";
 
 export type {
+  IIpc,
   IPCBody,
-  IPCRequest,
-  IPCResponse,
   IPCMethodHandler,
   IPCOptions,
-  IIpc,
+  IPCRequest,
+  IPCResponse,
 } from "./types.ts";
 
 export interface HostIPC extends IPCOptions {

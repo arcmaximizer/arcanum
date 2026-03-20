@@ -12,10 +12,15 @@ interface PendingRequest {
   timeoutId?: number;
 }
 
-export function createWorkerIPC(handlers: Record<string, IPCMethodHandler> = {}, options: {
-  timeout?: number;
-} = {}): WorkerIPC {
-  const handlerMap = new Map<string, IPCMethodHandler>(Object.entries(handlers));
+export function createWorkerIPC(
+  handlers: Record<string, IPCMethodHandler> = {},
+  options: {
+    timeout?: number;
+  } = {},
+): WorkerIPC {
+  const handlerMap = new Map<string, IPCMethodHandler>(
+    Object.entries(handlers),
+  );
   const pendingRequests = new Map<string, PendingRequest>();
 
   const ipc: WorkerIPC = {
@@ -34,7 +39,9 @@ export function createWorkerIPC(handlers: Record<string, IPCMethodHandler> = {},
         const timeoutId = timeout
           ? setTimeout(() => {
             pendingRequests.delete(id);
-            reject(new Error(`IPC call "${method}" timed out after ${timeout}ms`));
+            reject(
+              new Error(`IPC call "${method}" timed out after ${timeout}ms`),
+            );
           }, timeout) as unknown as number
           : undefined;
 

@@ -2,7 +2,7 @@
 // as well as any state changes and so on
 
 import type { Result } from "neverthrow";
-import { ok } from "neverthrow";
+import { err, ok } from "neverthrow";
 import { Hash, ProgramId, Serializable } from "../lib/types.ts";
 import { TreeStore } from "./store.ts";
 import { PackageStore } from "./packages.ts";
@@ -21,11 +21,7 @@ interface EventPrecommit extends EventProposal {
   children: EventPrecommit[];
 }
 
-export interface RunnerLikeWorker {
-  terminate?(): void;
-}
-
-export type WorkerFactory = (id: ProgramId | Hash) => RunnerLikeWorker;
+export type WorkerFactory = (id: ProgramId | Hash) => Worker;
 
 /*
 when it receives a "spawn" request
@@ -52,7 +48,8 @@ export default class Runner {
   store: TreeStore;
   packages: PackageStore;
   transactions: Map<string, Set<string>> = new Map();
-  workers: Map<string, RunnerLikeWorker> = new Map();
+  workers: Map<string, Worker> = new Map();
+
   private readonly workerFactory: WorkerFactory;
 
   constructor(
@@ -63,15 +60,21 @@ export default class Runner {
     this.store = store;
     this.packages = packages;
     this.workerFactory = workerFactory ??
-      ((id) =>
-        new Worker(new URL("./glue.ts", import.meta.url).href, {
+      ((id) => {
+        const w = new Worker(new URL("./glue.ts", import.meta.url).href, {
           type: "module",
-        }));
+        });
+
+        w.postMessage({ code: "" });
+
+        return w;
+      });
   }
 
-  spawn(id: ProgramId | Hash) {
+  spawn(id: ProgramId | Hash): Worker {
     const worker = this.workerFactory(id);
     this.workers.set(id, worker);
+    return worker;
   }
 
   async execute(
@@ -79,19 +82,19 @@ export default class Runner {
   ): Promise<Result<EventPrecommit, Error>> {
     const head = await this.store.getHead();
 
+    if (!head) return err(new Error("This shouldn't ever happen."));
+
     const resolved: EventProposal = {
       ...root,
-      base: root.base ?? head ?? undefined,
+      base: root.base ?? head,
     };
 
     if (!this.workers.has(resolved.to)) {
       this.spawn(resolved.to);
     }
 
-    if (resolved.base) {
-      this.store.getCache().addContention(resolved.base);
-      await this.store.traverseState(resolved.base).next();
-    }
+    this.store.getCache().addContention(resolved.base);
+    await this.store.traverseState(resolved.base).next();
 
     try {
       return ok({

@@ -5,10 +5,10 @@ export { createWorkerIPC } from "./worker.ts";
 export type { WorkerIPC } from "./api.ts";
 
 export type {
+  IIpc,
   IPCBody,
-  IPCRequest,
-  IPCResponse,
   IPCMethodHandler,
   IPCOptions,
-  IIpc,
+  IPCRequest,
+  IPCResponse,
 } from "./types.ts";

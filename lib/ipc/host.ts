@@ -28,7 +28,9 @@ export function createHostIPC(worker: Worker, options: {
         const timeoutId = timeout
           ? setTimeout(() => {
             pendingRequests.delete(id);
-            reject(new Error(`IPC call "${method}" timed out after ${timeout}ms`));
+            reject(
+              new Error(`IPC call "${method}" timed out after ${timeout}ms`),
+            );
           }, timeout) as unknown as number
           : undefined;
 

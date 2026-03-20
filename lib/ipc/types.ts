@@ -11,7 +11,7 @@ export interface IPCResponse {
 }
 
 export type IPCMethodHandler = (
-  body: IPCBody
+  body: IPCBody,
 ) => IPCBody | Promise<IPCBody>;
 
 export interface IPCOptions {
