@@ -92,17 +92,6 @@ function createContext(
       });
       return (result as { output: unknown }).output;
     },
-
-    notify(app: string, input: unknown): void {
-      checkAbort(eventId);
-      ipc.call("notify", {
-        from,
-        to: app,
-        input,
-        base,
-        metadata: {},
-      });
-    },
   };
 }
 

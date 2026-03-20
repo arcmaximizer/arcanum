@@ -43,10 +43,6 @@ export interface EventContext {
   set(key: string, value: unknown): Promise<void>;
   exists(key: string): Promise<boolean>;
   call(app: string, input: unknown): Promise<unknown>;
-  notify(app: string, input: unknown): void;
-  random(): number;
-  time(): number;
-  uuid(): string;
 }
 
 export function generateUUIDv7(): string {

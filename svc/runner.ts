@@ -162,11 +162,9 @@ export default class Runner {
     this.store.getCache().addContention(proposal.base);
 
     // Timeout promise for root event
-    let timeoutReject: ((err: Error) => void) | undefined;
     if (eventId === rootId) {
       const timeoutErr = new Error(`Event tree ${rootId} timed out`);
       const timeoutPromise = new Promise<never>((_, reject) => {
-        timeoutReject = () => reject(timeoutErr);
         pendingEvent.timeoutId = setTimeout(
           () => reject(timeoutErr),
           this.timeout,
@@ -174,7 +172,6 @@ export default class Runner {
       });
 
       try {
-        // Race: either the dispatch + tree completes, or the timeout fires
         await Promise.race([
           (async () => {
             await this.dispatch(ipc, proposal, eventId);
@@ -183,22 +180,8 @@ export default class Runner {
           timeoutPromise,
         ]);
 
-        return {
-          ...proposal,
-          id: eventId,
-          diffs: new Map(
-            Object.entries(pendingEvent.writes ?? {}).map(([k, v]) => [
-              k,
-              v as string | null,
-            ]),
-          ),
-          output: pendingEvent.output as Serializable,
-          children: [],
-          effects: [],
-        };
+        return this.buildPrecommit(proposal, eventId, pendingEvent);
       } catch (err) {
-        // On timeout, send abort messages to workers but don't reject
-        // pending events — the error propagates via throw
         if (!pendingEvent.settled) {
           const eventIds = this.transactions.get(rootId);
           if (eventIds) {
@@ -223,19 +206,7 @@ export default class Runner {
       await this.dispatch(ipc, proposal, eventId);
       await treeComplete;
 
-      return {
-        ...proposal,
-        id: eventId,
-        diffs: new Map(
-          Object.entries(pendingEvent.writes ?? {}).map(([k, v]) => [
-            k,
-            v as string | null,
-          ]),
-        ),
-        output: pendingEvent.output as Serializable,
-        children: [],
-        effects: [],
-      };
+      return this.buildPrecommit(proposal, eventId, pendingEvent);
     } catch (err) {
       pendingEvent.settled = true;
       throw err;
@@ -243,6 +214,26 @@ export default class Runner {
       this.store.getCache().removeContention(proposal.base);
       this.pendingEvents.delete(eventId);
     }
+  }
+
+  private buildPrecommit(
+    proposal: EventProposal & { base: string },
+    eventId: string,
+    pending: PendingEvent,
+  ): EventPrecommit {
+    return {
+      ...proposal,
+      id: eventId,
+      diffs: new Map(
+        Object.entries(pending.writes ?? {}).map(([k, v]) => [
+          k,
+          v as string | null,
+        ]),
+      ),
+      output: pending.output as Serializable,
+      children: [],
+      effects: [],
+    };
   }
 
   private async dispatch(
@@ -288,28 +279,6 @@ export default class Runner {
       if (!pending) return null;
       return this.store.get(key, pending.base);
     });
-
-    // Fire-and-forget notification
-    ipc.on("notify", async (body) => {
-      const proposal = body as EventProposal & { base: string };
-      const eventId = generateUUIDv7();
-      const notifyRootId = eventId;
-
-      this.transactions.set(notifyRootId, new Set([eventId]));
-      this.pendingEvents.set(eventId, {
-        resolve: () => {},
-        reject: () => {},
-        settled: false,
-        base: proposal.base,
-      });
-
-      try {
-        await this.executeEvent(proposal);
-      } finally {
-        this.pendingEvents.delete(eventId);
-        this.transactions.delete(notifyRootId);
-      }
-    });
   }
 
   private getOrCreateWorker(to: string): HostIPC {
@@ -324,49 +293,5 @@ export default class Runner {
       this.ipcs.set(to, ipc);
     }
     return ipc;
-  }
-
-  private handleTimeout(rootId: string): void {
-    const err = new Error(`Event tree ${rootId} timed out`);
-
-    // Reject all pending events with the timeout error BEFORE abandoning
-    const eventIds = this.transactions.get(rootId);
-    if (eventIds) {
-      for (const eventId of eventIds) {
-        const pending = this.pendingEvents.get(eventId);
-        if (pending) pending.reject(err);
-      }
-    }
-
-    this.abandon(rootId);
-  }
-
-  private abandon(rootId: string): void {
-    const eventIds = this.transactions.get(rootId);
-    if (!eventIds) return;
-
-    for (const eventId of eventIds) {
-      const pending = this.pendingEvents.get(eventId);
-      if (pending && !pending.settled) {
-        pending.settled = true;
-        pending.reject(new Error("Transaction abandoned"));
-      }
-    }
-
-    for (const [, ipc] of this.ipcs) {
-      for (const eventId of eventIds) {
-        ipc.call("abort", { eventId }).catch(() => {});
-      }
-    }
-
-    this.transactions.delete(rootId);
-  }
-
-  spawn(id: ProgramId | Hash): Worker {
-    const worker = this.workerFactory(id);
-    this.workers.set(id, worker);
-    const ipc = createHostIPC(worker);
-    this.ipcs.set(id, ipc);
-    return worker;
   }
 }

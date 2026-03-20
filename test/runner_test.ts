@@ -153,6 +153,36 @@ Deno.test("runner: worker reads undefined for missing key", async () => {
   assertEquals(result.output, { key: "nonexistent", value: undefined });
 });
 
+Deno.test("runner: ctx.exists returns true for existing key", async () => {
+  const store = await makeStore();
+  await seed(store);
+  const runner = makeRunner(store);
+
+  const result = await runner.execute({
+    from: "app/a" as any,
+    to: "exister" as any,
+    input: { key: "greeting" },
+    metadata: null,
+  });
+
+  assertEquals(result.output, { key: "greeting", exists: true });
+});
+
+Deno.test("runner: ctx.exists returns false for missing key", async () => {
+  const store = await makeStore();
+  await seed(store);
+  const runner = makeRunner(store);
+
+  const result = await runner.execute({
+    from: "app/a" as any,
+    to: "exister" as any,
+    input: { key: "nonexistent" },
+    metadata: null,
+  });
+
+  assertEquals(result.output, { key: "nonexistent", exists: false });
+});
+
 Deno.test("runner: worker error propagates", async () => {
   const store = await makeStore();
   await seed(store);
