@@ -38,6 +38,17 @@ export function isUUID(value: string): value is UUID {
   return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$/
     .test(value);
 }
+export interface EventContext {
+  get(key: string): Promise<unknown>;
+  set(key: string, value: unknown): Promise<void>;
+  exists(key: string): Promise<boolean>;
+  call(app: string, input: unknown): Promise<unknown>;
+  notify(app: string, input: unknown): void;
+  random(): number;
+  time(): number;
+  uuid(): string;
+}
+
 export function generateUUIDv7(): string {
   const buf = new Uint8Array(16);
 

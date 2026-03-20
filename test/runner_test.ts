@@ -1,168 +1,196 @@
-import { assertEquals, assertExists } from "@std/assert";
+import { assertEquals, assertRejects } from "@std/assert";
+import { Database } from "@db/sqlite";
+import { Kysely } from "kysely";
+import { createTreeTables, SqliteTreeStore } from "../svc/store.ts";
+import { DenoSqliteDialect } from "../lib/db_adapter.ts";
+import type { TreeDatabase } from "../svc/store.ts";
 import Runner from "../svc/runner.ts";
-import type {
-  CacheService,
-  TraversalState,
-  TreeStore,
-  TreeVisitor,
-} from "../svc/store.ts";
 
-class FakeCache implements CacheService {
-  readonly states = new Map<string, Map<string, string | null>>();
-  readonly contentions = new Map<string, number>();
-
-  addContention(eventId: string): void {
-    this.contentions.set(eventId, (this.contentions.get(eventId) ?? 0) + 1);
-  }
-
-  removeContention(eventId: string): void {
-    const next = (this.contentions.get(eventId) ?? 0) - 1;
-    if (next <= 0) {
-      this.contentions.delete(eventId);
-    } else {
-      this.contentions.set(eventId, next);
-    }
-  }
-
-  cacheState(eventId: string, state: Map<string, string | null>): void {
-    this.states.set(eventId, new Map(state));
-  }
-
-  getCachedState(eventId: string): Map<string, string | null> | undefined {
-    return this.states.get(eventId);
-  }
-
-  clear(): void {
-    this.states.clear();
-    this.contentions.clear();
-  }
+function workerUrl(name: string): string {
+  return new URL(`./workers/${name}.ts`, import.meta.url).href;
 }
 
-class FakeStore implements TreeStore {
-  readonly cache = new FakeCache();
-  readonly traversedBases: string[] = [];
-  head: string | null = "head-1";
-
-  async addNode(): Promise<void> {}
-  async getNode(): Promise<boolean> {
-    return false;
-  }
-  async addChild(): Promise<void> {}
-  async getParent(): Promise<string | null> {
-    return null;
-  }
-  async getChildren(): Promise<string[]> {
-    return [];
-  }
-  async getHead(): Promise<string | null> {
-    return this.head;
-  }
-  async getHeads(): Promise<Map<string, string>> {
-    return new Map();
-  }
-  async setHead(): Promise<void> {}
-  async nodes(): Promise<string[]> {
-    return [];
-  }
-  async createCheckpoint(): Promise<string> {
-    return "checkpoint";
-  }
-  async get(): Promise<string | null> {
-    return null;
-  }
-  async getNodeDetails(): Promise<
-    {
-      id: string;
-      parent: string | undefined;
-      base: string | undefined;
-      checkpoint_id: string | undefined;
-      from: string | undefined;
-      to: string | undefined;
-      index: number | undefined;
-      data: any;
-      returns: any;
-    } | null
-  > {
-    return null;
-  }
-  async getMany(): Promise<Map<string, string | null>> {
-    return new Map();
-  }
-  async getReads(): Promise<Set<string>> {
-    return new Set();
-  }
-  getCache(): CacheService {
-    return this.cache;
-  }
-  getStateBuildStats() {
-    return {
-      checkpointHits: 0,
-      fullRebuilds: 0,
-      lineageEventsApplied: 0,
-      cachedStateHits: 0,
-    } as const;
-  }
-  resetStateBuildStats(): void {}
-  async *traverseState(
-    eventId?: string,
-  ): AsyncGenerator<[string, string | null], void, unknown> {
-    if (eventId) {
-      this.traversedBases.push(eventId);
-      this.cache.cacheState(eventId, new Map([["warm", "1"]]));
-    }
-    yield ["warm", "1"];
-  }
-  async topologicalSort(): Promise<string[]> {
-    return [];
-  }
-  async traverse<C>(_visitor: TreeVisitor<C>, _context: C): Promise<void> {}
-  async traverseFrom<C>(
-    _nodeId: string,
-    _visitor: TreeVisitor<C>,
-    _context: C,
-  ): Promise<void> {}
+async function makeStore(): Promise<SqliteTreeStore> {
+  const db = new Database(":memory:");
+  const kysely = new Kysely<TreeDatabase>({
+    dialect: new DenoSqliteDialect({ database: db }),
+  });
+  await createTreeTables(kysely);
+  return new SqliteTreeStore(kysely);
 }
 
-Deno.test("runner execute warms base cache and releases contention", async () => {
-  const store = new FakeStore();
-  const workerIds: string[] = [];
-  const runner = new Runner(
-    store,
-    {} as never,
-    (id) => {
-      workerIds.push(String(id));
-      return {};
-    },
+async function seed(store: SqliteTreeStore) {
+  await store.addNode(
+    "root-1",
+    undefined,
+    new Map([["greeting", JSON.stringify("world")]]),
   );
+  await store.setHead("root-1");
+}
+
+function makeRunner(store: SqliteTreeStore, timeout?: number): Runner {
+  return new Runner(store, {} as never, () => {
+    const root = new URL("..", import.meta.url).pathname;
+    return new Worker(
+      new URL("../lib/runner/glue.ts", import.meta.url).href,
+      {
+        type: "module",
+        deno: {
+          permissions: {
+            read: [
+              `${root}lib/ipc/`,
+              `${root}lib/types.ts`,
+              `${root}test/workers/`,
+            ],
+            net: false,
+            write: false,
+            run: false,
+          },
+        },
+      } as WorkerOptions,
+    );
+  }, {
+    timeout,
+    resolveModuleUrl: (appId) => workerUrl(appId),
+  });
+}
+
+Deno.test("runner: simple event returns output", async () => {
+  const store = await makeStore();
+  await seed(store);
+  const runner = makeRunner(store);
 
   const result = await runner.execute({
-    from: "app/a" as never,
-    to: "app/b" as never,
-    input: null,
+    from: "app/a" as any,
+    to: "hello" as any,
+    input: { greeting: "hi" },
     metadata: null,
   });
 
-  assertEquals(result.isOk(), true);
-  assertEquals(workerIds, ["app/b"]);
-  assertEquals(store.traversedBases, ["head-1"]);
-  assertExists(store.cache.getCachedState("head-1"));
-  assertEquals(store.cache.contentions.get("head-1"), undefined);
+  assertEquals(result.output, { message: "hello", from: "app/a" });
+  assertEquals(typeof result.id, "string");
+  assertEquals(result.base, "root-1");
 });
 
-Deno.test("runner execute respects explicit base instead of current head", async () => {
-  const store = new FakeStore();
-  store.head = "head-2";
-  const runner = new Runner(store, {} as never, () => ({}));
+Deno.test("runner: explicit base overrides head", async () => {
+  const store = await makeStore();
+  await store.addNode("root-1");
+  await store.addNode(
+    "snap-1",
+    undefined,
+    new Map([["x", JSON.stringify(42)]]),
+  );
+  await store.setHead("root-1");
+
+  const runner = makeRunner(store);
 
   const result = await runner.execute({
-    from: "app/a" as never,
-    to: "app/c" as never,
+    from: "app/a" as any,
+    to: "hello" as any,
     input: null,
     metadata: null,
-    base: "snapshot-1",
+    base: "snap-1",
   });
 
-  assertEquals(result.isOk(), true);
-  assertEquals(store.traversedBases, ["snapshot-1"]);
-  assertExists(store.cache.getCachedState("snapshot-1"));
+  assertEquals(result.base, "snap-1");
+});
+
+Deno.test("runner: worker reads state via ctx.get", async () => {
+  const store = await makeStore();
+  await seed(store);
+  const runner = makeRunner(store);
+
+  const result = await runner.execute({
+    from: "app/a" as any,
+    to: "reader" as any,
+    input: { key: "greeting" },
+    metadata: null,
+  });
+
+  assertEquals(result.output, { key: "greeting", value: "world" });
+});
+
+Deno.test("runner: worker reads undefined for missing key", async () => {
+  const store = await makeStore();
+  await seed(store);
+  const runner = makeRunner(store);
+
+  const result = await runner.execute({
+    from: "app/a" as any,
+    to: "reader" as any,
+    input: { key: "nonexistent" },
+    metadata: null,
+  });
+
+  assertEquals(result.output, { key: "nonexistent", value: undefined });
+});
+
+Deno.test("runner: worker error propagates", async () => {
+  const store = await makeStore();
+  await seed(store);
+  const runner = makeRunner(store);
+
+  await assertRejects(
+    () =>
+      runner.execute({
+        from: "app/a" as any,
+        to: "failer" as any,
+        input: null,
+        metadata: null,
+      }),
+    Error,
+    "intentional failure",
+  );
+});
+
+Deno.test("runner: timeout abandons hanging event", async () => {
+  const store = await makeStore();
+  await seed(store);
+  const runner = makeRunner(store, 200);
+
+  await assertRejects(
+    () =>
+      runner.execute({
+        from: "app/a" as any,
+        to: "hanger" as any,
+        input: null,
+        metadata: null,
+      }),
+    Error,
+    "timed out",
+  );
+});
+
+Deno.test("runner: derived event via ctx.call", async () => {
+  const store = await makeStore();
+  await seed(store);
+  const runner = makeRunner(store);
+
+  const result = await runner.execute({
+    from: "app/a" as any,
+    to: "caller" as any,
+    input: { target: "hello", input: { ping: true } },
+    metadata: null,
+  });
+
+  assertEquals(result.output, {
+    called: "hello",
+    result: { message: "hello", from: "app/a" },
+  });
+});
+
+Deno.test("runner: worker writes are tracked in diffs", async () => {
+  const store = await makeStore();
+  await seed(store);
+  const runner = makeRunner(store);
+
+  const result = await runner.execute({
+    from: "app/a" as any,
+    to: "writer" as any,
+    input: { key: "count", value: 1 },
+    metadata: null,
+  });
+
+  assertEquals(result.diffs.get("count"), "1");
+  assertEquals(result.output, { written: "count" });
 });
