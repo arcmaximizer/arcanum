@@ -23,7 +23,8 @@ The runner and worker communicate using a bidirectional IPC layer built on
 - **Event**: A unit of computation. Sent from the runner to a worker, executed
   in userspace, and a result returned to the runner.
 - **Derived event**: An event spawned from within another event's execution.
-  Derived events are created via `ctx.call()` (part of the parent's transaction).
+  Derived events are created via `ctx.call()` (part of the parent's
+  transaction).
 - **Transaction**: A tree of events rooted at a single event. Includes the root
   event and all derived events spawned via `ctx.call()` during its execution.
 - **Contention**: A reference-counted marker on an event's base state. Prevents
@@ -54,12 +55,12 @@ ipc.terminate()          → tears down the IPC, rejects all pending calls
 
 **Worker → Runner:**
 
-| Method     | Body                | Description                              |
-| ---------- | ------------------- | ---------------------------------------- |
-| `call`     | proposal            | Request to execute a derived event       |
-| `getState` | key                 | Read state at the current event's base   |
-| `result`   | output, sideEffects | Event completed                          |
-| `error`    | error string        | Event failed                             |
+| Method     | Body                | Description                            |
+| ---------- | ------------------- | -------------------------------------- |
+| `call`     | proposal            | Request to execute a derived event     |
+| `getState` | key                 | Read state at the current event's base |
+| `result`   | output, sideEffects | Event completed                        |
+| `error`    | error string        | Event failed                           |
 
 ### Call/Return Flow
 

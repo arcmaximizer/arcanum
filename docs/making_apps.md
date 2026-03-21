@@ -47,16 +47,16 @@ export default async function (from: string, req: unknown, ctx) {
 
 The context object (`ctx`) provides the following methods:
 
-| Method                      | Description                                    |
-| --------------------------- | ---------------------------------------------- |
-| `ctx.get(key)`              | Read a value from state. Returns `undefined`   |
-|                             | if the key does not exist.                     |
-| `ctx.set(key, value)`       | Write a key-value pair to state.               |
-| `ctx.exists(key)`           | Check whether a key has a value. Returns       |
-|                             | `true` or `false`.                             |
-| `ctx.call(app, input)`      | Send a derived event to another app. Returns   |
-|                             | the other app's response. Part of your         |
-|                             | transaction.                                   |
+| Method                 | Description                                  |
+| ---------------------- | -------------------------------------------- |
+| `ctx.get(key)`         | Read a value from state. Returns `undefined` |
+|                        | if the key does not exist.                   |
+| `ctx.set(key, value)`  | Write a key-value pair to state.             |
+| `ctx.exists(key)`      | Check whether a key has a value. Returns     |
+|                        | `true` or `false`.                           |
+| `ctx.call(app, input)` | Send a derived event to another app. Returns |
+|                        | the other app's response. Part of your       |
+|                        | transaction.                                 |
 
 ## Example: a simple counter
 
