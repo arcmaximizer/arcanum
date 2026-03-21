@@ -5,37 +5,34 @@ only hurt yourself but also hurt the user experience.
 
 ## Using setTimeout and setInterval
 
-The isolate is not guaranteed to last. If you want to schedule tasks for the
-future, please use the timer object passed in `ctx` to your functions.
+The worker is not guaranteed to last. If you want to schedule tasks for the
+future, call the timer app via `ctx.call()`.
 
 Bad usage:
 
-```js
-function onArcnet(req, env, ctx) {
-  setTimeout(() => ctx.send(req.sender, "Ping!"), 3_000);
+```ts
+export default async function (from, req, ctx) {
+  setTimeout(() => console.log("Ping!"), 3_000);
   return "I'll send you a request soon!";
 }
 ```
 
 Good usage:
 
-```js
-async function onArcnet(req, env, ctx) {
-  let timerId = await ctx.addTimer(
-    { sender: req.sender, message: "Ping!" },
-    3_000,
-  );
+```ts
+export default async function (from, req, ctx) {
+  const timerId = await ctx.call("sys/timer", {
+    target: from,
+    message: "Ping!",
+    delay: 3_000,
+  });
   return `I'll send you a request soon! Timer ID: ${timerId}`;
-}
-
-async function onTimer(event, env, ctx) {
-  await ctx.send(event.sender, event.message);
 }
 ```
 
 ## Using filesystem APIs
 
-This will not work. Use the state provided.
+This will not work. Use `ctx.get()` and `ctx.set()` for state.
 
 ## Using global-scoped state
 
@@ -44,4 +41,9 @@ reasons - but be extremely careful with it as well.
 
 ## Using randomness in the global scope
 
-This will not work.
+This will not work. Use `ctx.random()` or call a randomness extension.
+
+## Blocking the event loop
+
+Don't do this. Offload blocking computations to a dedicated app or runtime
+extension via `ctx.call()`.

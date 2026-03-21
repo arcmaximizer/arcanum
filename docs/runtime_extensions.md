@@ -20,20 +20,30 @@ in general, it should be treated as fundamentally unreliable and ephemeral. A
 runtime extension will not maintain its state after a reboot as it is stored
 within the global scope.
 
+Runtime extensions use the same function signature as regular apps:
+
+```ts
+export default async function (from: string, req: unknown, ctx) {
+  // from — the ProgramId of the caller
+  // req  — the event payload
+  // ctx  — the event context
+}
+```
+
 For example, here is a runtime extension which maintains a persistent WebSocket
 connection to an external server:
 
 ```ts
 let sockets: Map<string, WebSocket> = new Map();
 
-export default function (req, env, ctx) {
+export default async function (from, req, ctx) {
   if (req.type == "open") {
     if (sockets.has(req.url)) return "already exists";
     const ws = new WebSocket(req.url);
     sockets.set(req.url, ws);
 
     ws.onmessage = (e) => {
-      ctx.send(env.from, e.data);
+      ctx.call(from, e.data);
     };
   }
 }

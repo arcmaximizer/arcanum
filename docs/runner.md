@@ -23,11 +23,9 @@ The runner and worker communicate using a bidirectional IPC layer built on
 - **Event**: A unit of computation. Sent from the runner to a worker, executed
   in userspace, and a result returned to the runner.
 - **Derived event**: An event spawned from within another event's execution.
-  Derived events are created via `ctx.call()` (part of the parent's transaction)
-  or `ctx.notify()` (independent, fire-and-forget).
+  Derived events are created via `ctx.call()` (part of the parent's transaction).
 - **Transaction**: A tree of events rooted at a single event. Includes the root
   event and all derived events spawned via `ctx.call()` during its execution.
-  Events spawned via `ctx.notify()` are independent transactions.
 - **Contention**: A reference-counted marker on an event's base state. Prevents
   the cache from evicting state while an event is using it.
 - **Pending event**: An event that has been sent to a worker but has not yet
@@ -59,7 +57,6 @@ ipc.terminate()          → tears down the IPC, rejects all pending calls
 | Method     | Body                | Description                              |
 | ---------- | ------------------- | ---------------------------------------- |
 | `call`     | proposal            | Request to execute a derived event       |
-| `notify`   | proposal            | Fire-and-forget event (independent root) |
 | `getState` | key                 | Read state at the current event's base   |
 | `result`   | output, sideEffects | Event completed                          |
 | `error`    | error string        | Event failed                             |
@@ -104,8 +101,6 @@ The userspace function runs. It can:
 - Read state via `ctx.getState(key)`
 - Call other apps via `ctx.call(app, input)` — awaits a response, part of the
   transaction tree
-- Notify other apps via `ctx.notify(app, input)` — fire-and-forget, independent
-  transaction
 - Write to local state (tracked as diffs)
 - Return a result
 
@@ -164,9 +159,6 @@ const result = await ctx.call("other-app", "query");
 // Not awaited — I don't need the result, but the event still runs
 // as part of my transaction
 ctx.call("other-app", "increment");
-
-// Fire-and-forget — independent event, no parent relationship
-ctx.notify("other-app", "ping");
 ```
 
 ### `ctx.call(app, input)`
@@ -187,12 +179,6 @@ The glue code sends a `call` message to the runner. The runner:
 Whether the user `await`s the call or not, the child event is part of the same
 transaction. The distinction is only about whether the user needs the return
 value.
-
-### `ctx.notify(app, input)`
-
-Sends an event to `app`. This creates a new, independent root event — it is
-_not_ tracked under the parent's transaction tree. The parent does not wait for
-it. The runner handles it as a separate transaction with its own lifecycle.
 
 ### Transaction Tree
 
@@ -216,9 +202,6 @@ rootId: "evt-A"
 
 If `evt-A` times out, all four events are abandoned. If `evt-D` times out,
 `abandon("evt-A")` is called, and the entire tree is cancelled.
-
-Events spawned via `ctx.notify()` do _not_ appear in the parent's transaction
-tree. They are independent root events with their own `rootId`.
 
 #### Completion semantics
 
