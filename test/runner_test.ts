@@ -6,10 +6,6 @@ import { DenoSqliteDialect } from "../lib/db_adapter.ts";
 import type { TreeDatabase } from "../svc/store.ts";
 import Runner from "../svc/runner.ts";
 
-function workerUrl(name: string): string {
-  return new URL(`./workers/${name}.ts`, import.meta.url).href;
-}
-
 async function makeStore(): Promise<SqliteTreeStore> {
   const db = new Database(":memory:");
   const kysely = new Kysely<TreeDatabase>({
@@ -28,10 +24,16 @@ async function seed(store: SqliteTreeStore) {
   await store.setHead("root-1");
 }
 
-function makeRunner(store: SqliteTreeStore, timeout?: number): Runner {
-  return new Runner(store, {} as never, () => {
+async function makeRunner(
+  store: SqliteTreeStore,
+  timeout?: number,
+): Promise<Runner> {
+  return new Runner(store, {} as never, async (id) => {
     const root = new URL("..", import.meta.url).pathname;
-    return new Worker(
+    const code = await Deno.readFile(
+      new URL(`./workers/${id}.ts`, import.meta.url),
+    );
+    const worker = new Worker(
       new URL("../lib/runner/glue.ts", import.meta.url).href,
       {
         type: "module",
@@ -40,7 +42,6 @@ function makeRunner(store: SqliteTreeStore, timeout?: number): Runner {
             read: [
               `${root}lib/ipc/`,
               `${root}lib/types.ts`,
-              `${root}test/workers/`,
             ],
             net: false,
             write: false,
@@ -49,16 +50,17 @@ function makeRunner(store: SqliteTreeStore, timeout?: number): Runner {
         },
       } as WorkerOptions,
     );
+    worker.postMessage({ type: "init", entrypoint: code.buffer });
+    return worker;
   }, {
     timeout,
-    resolveModuleUrl: (appId) => workerUrl(appId),
   });
 }
 
 Deno.test("runner: simple event returns output", async () => {
   const store = await makeStore();
   await seed(store);
-  const runner = makeRunner(store);
+  const runner = await makeRunner(store);
 
   const result = await runner.execute({
     from: "app/a" as any,
@@ -86,7 +88,7 @@ Deno.test("runner: explicit base reads state from base, not head", async () => {
     new Map([["color", JSON.stringify("blue")]]),
   );
 
-  const runner = makeRunner(store);
+  const runner = await makeRunner(store);
 
   const result = await runner.execute({
     from: "app/a" as any,
@@ -119,7 +121,7 @@ Deno.test("runner: base is captured before execution, not affected by head chang
   await store.setHead("root-1");
   assertEquals(await store.getHead(), "root-1");
 
-  const runner = makeRunner(store, 500);
+  const runner = await makeRunner(store, 500);
 
   // Start execution — base is resolved to "root-1" (current head) immediately
   const p = runner.execute({
@@ -141,7 +143,7 @@ Deno.test("runner: base is captured before execution, not affected by head chang
 Deno.test("runner: worker reads undefined for missing key", async () => {
   const store = await makeStore();
   await seed(store);
-  const runner = makeRunner(store);
+  const runner = await makeRunner(store);
 
   const result = await runner.execute({
     from: "app/a" as any,
@@ -156,7 +158,7 @@ Deno.test("runner: worker reads undefined for missing key", async () => {
 Deno.test("runner: ctx.exists returns true for existing key", async () => {
   const store = await makeStore();
   await seed(store);
-  const runner = makeRunner(store);
+  const runner = await makeRunner(store);
 
   const result = await runner.execute({
     from: "app/a" as any,
@@ -171,7 +173,7 @@ Deno.test("runner: ctx.exists returns true for existing key", async () => {
 Deno.test("runner: ctx.exists returns false for missing key", async () => {
   const store = await makeStore();
   await seed(store);
-  const runner = makeRunner(store);
+  const runner = await makeRunner(store);
 
   const result = await runner.execute({
     from: "app/a" as any,
@@ -186,7 +188,7 @@ Deno.test("runner: ctx.exists returns false for missing key", async () => {
 Deno.test("runner: worker error propagates", async () => {
   const store = await makeStore();
   await seed(store);
-  const runner = makeRunner(store);
+  const runner = await makeRunner(store);
 
   await assertRejects(
     () =>
@@ -204,7 +206,7 @@ Deno.test("runner: worker error propagates", async () => {
 Deno.test("runner: timeout releases contention and rejects", async () => {
   const store = await makeStore();
   await seed(store);
-  const runner = makeRunner(store, 200);
+  const runner = await makeRunner(store, 200);
 
   await assertRejects(
     () =>
@@ -225,7 +227,7 @@ Deno.test("runner: timeout releases contention and rejects", async () => {
 Deno.test("runner: derived event via ctx.call", async () => {
   const store = await makeStore();
   await seed(store);
-  const runner = makeRunner(store);
+  const runner = await makeRunner(store);
 
   const result = await runner.execute({
     from: "app/a" as any,
@@ -243,7 +245,7 @@ Deno.test("runner: derived event via ctx.call", async () => {
 Deno.test("runner: worker writes are tracked in diffs", async () => {
   const store = await makeStore();
   await seed(store);
-  const runner = makeRunner(store);
+  const runner = await makeRunner(store);
 
   const result = await runner.execute({
     from: "app/a" as any,

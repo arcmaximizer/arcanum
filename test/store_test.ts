@@ -977,3 +977,191 @@ Deno.test("getNodeDetails returns null for non-existent node", async () => {
 
   await db.destroy();
 });
+
+Deno.test("addCodeUpgrade creates node with type upgrade and stores hash", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode("root-1");
+  await store.addCodeUpgrade("upgrade-1", "root-1", "abc123hash", 1);
+
+  const details = await store.getNodeDetails("upgrade-1");
+  assertExists(details);
+  assertEquals(details.type, "upgrade");
+  assertEquals(details.parent, "root-1");
+  assertEquals(details.base, "root-1");
+  assertEquals(details.index, 1);
+
+  const hash = await store.getCodeUpgrade("upgrade-1");
+  assertEquals(hash, "abc123hash");
+
+  await db.destroy();
+});
+
+Deno.test("getCodeUpgrade returns null for non-upgrade node", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode("root-1");
+
+  const hash = await store.getCodeUpgrade("root-1");
+  assertEquals(hash, null);
+
+  await db.destroy();
+});
+
+Deno.test("getCodeUpgrade returns null for non-existent node", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  const hash = await store.getCodeUpgrade("nonexistent");
+  assertEquals(hash, null);
+
+  await db.destroy();
+});
+
+Deno.test("getNodeDetails returns type event for regular nodes", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode("evt-1");
+
+  const details = await store.getNodeDetails("evt-1");
+  assertExists(details);
+  assertEquals(details.type, "event");
+
+  await db.destroy();
+});
+
+Deno.test("addCodeUpgrade sets head", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode("root-1");
+  assertEquals(await store.getHead(), "root-1");
+
+  await store.addCodeUpgrade("upgrade-1", "root-1", "hash-v2");
+  assertEquals(await store.getHead(), "upgrade-1");
+
+  await db.destroy();
+});
+
+Deno.test("code upgrade tree is traversable", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode("root-1");
+  await store.addNode("evt-1", "root-1");
+  await store.addCodeUpgrade("upgrade-1", "evt-1", "hash-v2", 2);
+
+  const children = await store.getChildren("evt-1");
+  assertEquals(children, ["upgrade-1"]);
+
+  const parent = await store.getParent("upgrade-1");
+  assertEquals(parent, "evt-1");
+
+  const sorted = await store.topologicalSort();
+  assertEquals(sorted, ["root-1", "evt-1", "upgrade-1"]);
+
+  await db.destroy();
+});
+
+Deno.test("getCodeAtBase returns code hash from lineage", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode("root-1");
+  await store.addCodeUpgrade("upgrade-1", "root-1", "hash-v2");
+  await store.addNode("evt-1", "upgrade-1");
+
+  // evt-1 is after upgrade-1, so it should see hash-v2
+  const code = await store.getCodeAtBase("evt-1");
+  assertEquals(code, "hash-v2");
+
+  await db.destroy();
+});
+
+Deno.test("getCodeAtBase returns null when no upgrade in lineage", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode("root-1");
+  await store.addNode("evt-1", "root-1");
+
+  const code = await store.getCodeAtBase("evt-1");
+  assertEquals(code, null);
+
+  await db.destroy();
+});
+
+Deno.test("getCodeAtBase returns null for non-existent node", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  const code = await store.getCodeAtBase("nonexistent");
+  assertEquals(code, null);
+
+  await db.destroy();
+});
+
+Deno.test("code changes mid-execution: event with base before upgrade sees old code", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  // root-1 has code hash-v1
+  await store.addNode("root-1");
+  await store.addCodeUpgrade("upgrade-1", "root-1", "hash-v1");
+
+  // evt-1 starts with base at upgrade-1 (hash-v1)
+  await store.addNode("evt-1", "upgrade-1");
+  const baseBeforeUpgrade = "upgrade-1";
+
+  // While evt-1 is "running", a new code upgrade happens
+  await store.addNode("evt-2", "evt-1");
+  await store.addCodeUpgrade("upgrade-2", "evt-2", "hash-v2");
+
+  // evt-1's base is still upgrade-1, so it should see hash-v1
+  const codeAtBase = await store.getCodeAtBase(baseBeforeUpgrade);
+  assertEquals(codeAtBase, "hash-v1");
+
+  // New events after upgrade-2 should see hash-v2
+  await store.addNode("evt-3", "upgrade-2");
+  const codeAfterUpgrade = await store.getCodeAtBase("evt-3");
+  assertEquals(codeAfterUpgrade, "hash-v2");
+
+  await db.destroy();
+});
+
+Deno.test("multiple code upgrades: getCodeAtBase returns most recent before base", async () => {
+  const db = createTestDb();
+  await createTreeTables(db);
+  const store = new SqliteTreeStore(db);
+
+  await store.addNode("root-1");
+  await store.addCodeUpgrade("upgrade-1", "root-1", "hash-v1");
+  await store.addNode("evt-1", "upgrade-1");
+  await store.addCodeUpgrade("upgrade-2", "evt-1", "hash-v2");
+  await store.addNode("evt-2", "upgrade-2");
+
+  // evt-2's lineage: root-1 -> upgrade-1 -> evt-1 -> upgrade-2 -> evt-2
+  // Most recent upgrade before/at evt-2 is upgrade-2 with hash-v2
+  const code = await store.getCodeAtBase("evt-2");
+  assertEquals(code, "hash-v2");
+
+  // evt-1's lineage: root-1 -> upgrade-1 -> evt-1
+  // Most recent upgrade before/at evt-1 is upgrade-1 with hash-v1
+  const codeAtEvt1 = await store.getCodeAtBase("evt-1");
+  assertEquals(codeAtEvt1, "hash-v1");
+
+  await db.destroy();
+});

@@ -47,6 +47,15 @@ function createStateTracker(
 
 const aborting = new Set<string>();
 
+let entrypoint: string | null = null;
+
+self.onmessage = (e) => {
+  if (e.data?.type === "init" && e.data.entrypoint) {
+    const blob = new Blob([e.data.entrypoint], { type: "text/typescript" });
+    entrypoint = URL.createObjectURL(blob);
+  }
+};
+
 const ipc = createWorkerIPC();
 
 function checkAbort(eventId: string): void {
@@ -98,15 +107,16 @@ function createContext(
 // Handle execute requests from runner
 ipc.on("execute", async (body) => {
   const proposal = body as EventProposal;
-  const { eventId, moduleUrl, input, from, base } = proposal;
+  const { eventId, input, from, base } = proposal;
 
   const tracker = createStateTracker(eventId, ipc);
 
   try {
-    const mod = await import(moduleUrl);
+    const url = entrypoint ?? proposal.moduleUrl;
+    const mod = await import(url);
     const userspaceFn = mod.default;
     if (typeof userspaceFn !== "function") {
-      throw new Error(`Module ${moduleUrl} has no default export function`);
+      throw new Error(`Module ${url} has no default export function`);
     }
 
     const ctx = createContext(eventId, base ?? eventId, from, tracker);

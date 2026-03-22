@@ -12,6 +12,7 @@ import type {
 // No caching, no checkpoints, purely event-based reconstruction
 export class ReferenceTreeStore implements TreeStore {
   private nodeData = new Map<string, {
+    type: string;
     parent: string | undefined;
     base: string | undefined;
     index: number | undefined;
@@ -30,6 +31,7 @@ export class ReferenceTreeStore implements TreeStore {
   private heads = new Map<string, string>(); // treeId -> eventId
   private derivedEvents = new Map<string, string[]>(); // originId -> [derivedIds]
   private effects = new Map<string, any[]>(); // eventId -> effects
+  private codeUpgrades = new Map<string, string>(); // nodeId -> hash
 
   constructor(private readonly db: Kysely<TreeDatabase>) {}
 
@@ -65,10 +67,12 @@ export class ReferenceTreeStore implements TreeStore {
     event?: EventData,
     derived?: string[],
     effects?: any[],
+    type: string = "event",
   ): Promise<void> {
     // Store node data (idempotent - don't overwrite if exists)
     if (!this.nodeData.has(id)) {
       this.nodeData.set(id, {
+        type,
         parent,
         base: base ?? parent ?? id,
         index,
@@ -123,6 +127,7 @@ export class ReferenceTreeStore implements TreeStore {
   async getNodeDetails(id: string): Promise<
     {
       id: string;
+      type: string;
       parent: string | undefined;
       base: string | undefined;
       checkpoint_id: string | undefined;
@@ -139,6 +144,7 @@ export class ReferenceTreeStore implements TreeStore {
     const event = this.eventData.get(id);
     return {
       id,
+      type: node.type,
       parent: node.parent,
       base: node.base,
       checkpoint_id: undefined, // No checkpoints in reference implementation
@@ -162,6 +168,7 @@ export class ReferenceTreeStore implements TreeStore {
     // If child doesn't exist yet, create a minimal node entry
     if (!existingChild) {
       this.nodeData.set(child, {
+        type: "event",
         parent,
         base: parent,
         index: undefined,
@@ -210,6 +217,40 @@ export class ReferenceTreeStore implements TreeStore {
     // No checkpoints in reference implementation
     // Return a dummy ID to maintain interface compatibility
     return `checkpoint_${eventId}`;
+  }
+
+  async addCodeUpgrade(
+    id: string,
+    parent: string,
+    hash: string,
+    index?: number,
+  ): Promise<void> {
+    if (!this.nodeData.has(id)) {
+      this.nodeData.set(id, {
+        type: "upgrade",
+        parent,
+        base: parent,
+        index,
+      });
+    }
+    this.codeUpgrades.set(id, hash);
+    await this.setHead(id, "main");
+  }
+
+  async getCodeUpgrade(nodeId: string): Promise<string | null> {
+    return this.codeUpgrades.get(nodeId) ?? null;
+  }
+
+  async getCodeAtBase(baseNodeId: string): Promise<string | null> {
+    const lineage = await this.getLineage(baseNodeId);
+    // Walk lineage from base (end) to root, return the first code upgrade found
+    for (let i = lineage.length - 1; i >= 0; i--) {
+      const nodeId = lineage[i];
+      if (nodeId && this.codeUpgrades.has(nodeId)) {
+        return this.codeUpgrades.get(nodeId)!;
+      }
+    }
+    return null;
   }
 
   async get(key: string, eventId?: string): Promise<string | null> {

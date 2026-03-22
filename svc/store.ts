@@ -10,6 +10,7 @@ export interface EventData {
 export interface TreeDatabase {
   nodes: {
     id: string;
+    type: string;
     parent: string | undefined;
     base: string | undefined;
     checkpoint_id: string | undefined;
@@ -54,6 +55,10 @@ export interface TreeDatabase {
     event_id: string;
     effect_data: string;
   };
+  code_upgrades: {
+    node_id: string;
+    hash: string;
+  };
 }
 
 export interface TreeStore {
@@ -67,11 +72,13 @@ export interface TreeStore {
     event?: EventData,
     derived?: string[],
     effects?: any[],
+    type?: string,
   ): Promise<void>;
   getNode(id: string): Promise<boolean>;
   getNodeDetails(id: string): Promise<
     {
       id: string;
+      type: string;
       parent: string | undefined;
       base: string | undefined;
       checkpoint_id: string | undefined;
@@ -90,6 +97,14 @@ export interface TreeStore {
   setHead(eventId: string, treeId?: string): Promise<void>;
   nodes(): Promise<string[]>;
   createCheckpoint(eventId: string): Promise<string>;
+  addCodeUpgrade(
+    id: string,
+    parent: string,
+    hash: string,
+    index?: number,
+  ): Promise<void>;
+  getCodeUpgrade(nodeId: string): Promise<string | null>;
+  getCodeAtBase(baseNodeId: string): Promise<string | null>;
   get(key: string, eventId?: string): Promise<string | null>;
   getMany(
     keys: string[],
@@ -198,6 +213,7 @@ export async function up(db: Kysely<any>): Promise<void> {
   await db.schema
     .createTable("nodes")
     .addColumn("id", "text", (col) => col.notNull())
+    .addColumn("type", "text", (col) => col.notNull().defaultTo("event"))
     .addColumn("parent", "text")
     .addColumn("base", "text")
     .addColumn("checkpoint_id", "text")
@@ -270,6 +286,13 @@ export async function up(db: Kysely<any>): Promise<void> {
     .addColumn("effect_data", "text", (col) => col.notNull())
     .addPrimaryKeyConstraint("pk_effects", ["event_id"])
     .execute();
+
+  await db.schema
+    .createTable("code_upgrades")
+    .addColumn("node_id", "text", (col) => col.notNull())
+    .addColumn("hash", "text", (col) => col.notNull())
+    .addPrimaryKeyConstraint("pk_code_upgrades", ["node_id"])
+    .execute();
 }
 
 export async function down(db: Kysely<any>): Promise<void> {
@@ -282,6 +305,7 @@ export async function down(db: Kysely<any>): Promise<void> {
   await db.schema.dropTable("heads").execute();
   await db.schema.dropTable("derived_events").execute();
   await db.schema.dropTable("effects").execute();
+  await db.schema.dropTable("code_upgrades").execute();
 }
 
 export const createTreeTables = up;
@@ -339,6 +363,7 @@ export class SqliteTreeStore implements TreeStore {
     event?: EventData,
     derived?: string[],
     effects?: any[],
+    type: string = "event",
   ): Promise<void> {
     let checkpointId: string | undefined;
 
@@ -358,6 +383,7 @@ export class SqliteTreeStore implements TreeStore {
       .insertInto("nodes")
       .values({
         id,
+        type,
         parent,
         base: base ?? parent ?? id,
         checkpoint_id: nodeHasWrites ? undefined : checkpointId,
@@ -452,6 +478,7 @@ export class SqliteTreeStore implements TreeStore {
   async getNodeDetails(id: string): Promise<
     {
       id: string;
+      type: string;
       parent: string | undefined;
       base: string | undefined;
       checkpoint_id: string | undefined;
@@ -467,6 +494,7 @@ export class SqliteTreeStore implements TreeStore {
       .leftJoin("events", "nodes.id", "events.id")
       .select([
         "nodes.id",
+        "nodes.type",
         "nodes.parent",
         "nodes.base",
         "nodes.checkpoint_id",
@@ -481,6 +509,7 @@ export class SqliteTreeStore implements TreeStore {
     if (!row) return null;
     return {
       id: row.id,
+      type: row.type,
       parent: row.parent,
       base: row.base,
       checkpoint_id: row.checkpoint_id,
@@ -510,7 +539,7 @@ export class SqliteTreeStore implements TreeStore {
 
     await this.db
       .insertInto("nodes")
-      .values({ id: child, parent, checkpoint_id: undefined })
+      .values({ id: child, type: "event", parent, checkpoint_id: undefined })
       .onConflict((oc) => oc.column("id").doUpdateSet({ parent }))
       .execute();
   }
@@ -629,6 +658,69 @@ export class SqliteTreeStore implements TreeStore {
       .execute();
 
     return checkpointId;
+  }
+
+  async addCodeUpgrade(
+    id: string,
+    parent: string,
+    hash: string,
+    index?: number,
+  ): Promise<void> {
+    await this.db
+      .insertInto("nodes")
+      .values({
+        id,
+        type: "upgrade",
+        parent,
+        base: parent,
+        checkpoint_id: undefined,
+        index,
+      })
+      .onConflict((oc) => oc.column("id").doNothing())
+      .execute();
+
+    await this.db
+      .insertInto("code_upgrades")
+      .values({ node_id: id, hash })
+      .execute();
+
+    await this.setHead(id, "main");
+  }
+
+  async getCodeUpgrade(nodeId: string): Promise<string | null> {
+    const row = await this.db
+      .selectFrom("code_upgrades")
+      .select("hash")
+      .where("node_id", "=", nodeId)
+      .executeTakeFirst();
+    return row?.hash ?? null;
+  }
+
+  async getCodeAtBase(baseNodeId: string): Promise<string | null> {
+    const lineage = await this.getLineage(baseNodeId);
+    if (lineage.length === 0) return null;
+
+    const upgrades = await this.db
+      .selectFrom("code_upgrades")
+      .select(["node_id", "hash"])
+      .where("node_id", "in", lineage)
+      .execute();
+
+    if (upgrades.length === 0) return null;
+
+    const upgradeMap = new Map(
+      upgrades.map((u) => [u.node_id, u.hash]),
+    );
+
+    // Walk lineage from base (end) to root, return the first code upgrade found
+    for (let i = lineage.length - 1; i >= 0; i--) {
+      const nodeId = lineage[i];
+      if (nodeId && upgradeMap.has(nodeId)) {
+        return upgradeMap.get(nodeId)!;
+      }
+    }
+
+    return null;
   }
 
   private async getLineage(eventId: string): Promise<string[]> {

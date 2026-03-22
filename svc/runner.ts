@@ -22,7 +22,7 @@ interface EventPrecommit extends EventProposal {
   effects: Serializable[];
 }
 
-export type WorkerFactory = (id: ProgramId | Hash) => Worker;
+export type WorkerFactory = (id: ProgramId | Hash) => Promise<Worker>;
 
 interface PendingEvent {
   resolve: () => void;
@@ -33,6 +33,7 @@ interface PendingEvent {
   output?: unknown;
   reads?: string[];
   writes?: Record<string, string | null>;
+  error?: string;
 }
 
 export interface RunnerOptions {
@@ -64,9 +65,14 @@ export default class Runner {
     this.store = store;
     this.packages = packages;
     this.workerFactory = workerFactory ??
-      (() => {
+      (async (id) => {
         const root = new URL("..", import.meta.url).pathname;
-        return new Worker(
+
+        const result = await this.packages.getEntrypoint(id as Hash);
+        if (result.isErr()) throw result.error;
+        const code = await result.value.arrayBuffer();
+
+        const worker = new Worker(
           new URL("../lib/runner/glue.ts", import.meta.url).href,
           {
             type: "module",
@@ -80,6 +86,10 @@ export default class Runner {
             },
           } as WorkerOptions,
         );
+
+        worker.postMessage({ type: "init", entrypoint: code });
+
+        return worker;
       });
     this.timeout = options?.timeout ?? DEFAULT_TIMEOUT;
     this.resolveModuleUrl = options?.resolveModuleUrl ??
@@ -130,36 +140,7 @@ export default class Runner {
     this.pendingEvents.set(eventId, pendingEvent);
 
     // Get or create IPC for target worker
-    const ipc = this.getOrCreateWorker(proposal.to);
-    this.setupHandlers(ipc, rootId);
-
-    // Event-specific result handler — receives output from glue
-    ipc.on("result", (body) => {
-      const { eventId: resultEventId, output, reads, writes } = body as {
-        eventId: string;
-        output: unknown;
-        reads?: string[];
-        writes?: Record<string, string | null>;
-      };
-      const pending = this.pendingEvents.get(resultEventId);
-      if (!pending || pending.settled) return;
-      pending.output = output;
-      pending.reads = reads;
-      pending.writes = writes;
-      pending.settled = true;
-      pending.resolve();
-    });
-
-    // Event-specific error handler — resolves treeComplete so the
-    // runner doesn't hang waiting for a result that will never come.
-    // The actual error propagates via dispatch's rejection.
-    ipc.on("error", (body) => {
-      const { eventId: resultEventId } = body as { eventId: string };
-      const pending = this.pendingEvents.get(resultEventId);
-      if (!pending || pending.settled) return;
-      pending.settled = true;
-      pending.resolve();
-    });
+    const ipc = await this.getOrCreateWorker(proposal.to);
 
     // Add contention on base
     this.store.getCache().addContention(proposal.base);
@@ -179,6 +160,9 @@ export default class Runner {
           (async () => {
             await this.dispatch(ipc, proposal, eventId);
             await treeComplete;
+            if (pendingEvent.error) {
+              throw new Error(pendingEvent.error);
+            }
           })(),
           timeoutPromise,
         ]);
@@ -201,6 +185,7 @@ export default class Runner {
         this.store.getCache().removeContention(proposal.base);
         if (pendingEvent.timeoutId) clearTimeout(pendingEvent.timeoutId);
         this.pendingEvents.delete(eventId);
+        this.transactions.delete(rootId);
       }
     }
 
@@ -208,6 +193,9 @@ export default class Runner {
     try {
       await this.dispatch(ipc, proposal, eventId);
       await treeComplete;
+      if (pendingEvent.error) {
+        throw new Error(pendingEvent.error);
+      }
 
       return this.buildPrecommit(proposal, eventId, pendingEvent);
     } catch (err) {
@@ -247,7 +235,22 @@ export default class Runner {
     await ipc.call("execute", { ...proposal, eventId });
   }
 
-  private setupHandlers(ipc: HostIPC, rootId: string): void {
+  private async getOrCreateWorker(to: string): Promise<HostIPC> {
+    let ipc = this.ipcs.get(to);
+    if (!ipc) {
+      let worker = this.workers.get(to);
+      if (!worker) {
+        worker = await this.workerFactory(to as ProgramId | Hash);
+        this.workers.set(to, worker);
+      }
+      ipc = createHostIPC(worker);
+      this.ipcs.set(to, ipc);
+      this.registerHandlers(ipc);
+    }
+    return ipc;
+  }
+
+  private registerHandlers(ipc: HostIPC): void {
     // Derived event call from worker
     ipc.on("call", async (body) => {
       const proposal = body as EventProposal & {
@@ -257,25 +260,7 @@ export default class Runner {
       if (!proposal.moduleUrl) {
         proposal.moduleUrl = this.resolveModuleUrl(proposal.to);
       }
-      const eventId = generateUUIDv7();
-
-      if (!this.transactions.has(rootId)) {
-        this.transactions.set(rootId, new Set());
-      }
-      this.transactions.get(rootId)!.add(eventId);
-
-      this.pendingEvents.set(eventId, {
-        resolve: () => {},
-        reject: () => {},
-        settled: false,
-        base: proposal.base,
-      });
-
-      try {
-        return await this.executeEvent(proposal);
-      } finally {
-        this.pendingEvents.delete(eventId);
-      }
+      return await this.executeEvent(proposal);
     });
 
     // State read from worker
@@ -285,19 +270,35 @@ export default class Runner {
       if (!pending) return null;
       return this.store.get(key, pending.base);
     });
-  }
 
-  private getOrCreateWorker(to: string): HostIPC {
-    let ipc = this.ipcs.get(to);
-    if (!ipc) {
-      let worker = this.workers.get(to);
-      if (!worker) {
-        worker = this.workerFactory(to as ProgramId | Hash);
-        this.workers.set(to, worker);
-      }
-      ipc = createHostIPC(worker);
-      this.ipcs.set(to, ipc);
-    }
-    return ipc;
+    // Result from worker — receives output from glue
+    ipc.on("result", (body) => {
+      const { eventId: resultEventId, output, reads, writes } = body as {
+        eventId: string;
+        output: unknown;
+        reads?: string[];
+        writes?: Record<string, string | null>;
+      };
+      const pending = this.pendingEvents.get(resultEventId);
+      if (!pending || pending.settled) return;
+      pending.output = output;
+      pending.reads = reads;
+      pending.writes = writes;
+      pending.settled = true;
+      pending.resolve();
+    });
+
+    // Error from worker — stores error and resolves so executeEvent can throw
+    ipc.on("error", (body) => {
+      const { eventId: resultEventId, error } = body as {
+        eventId: string;
+        error?: string;
+      };
+      const pending = this.pendingEvents.get(resultEventId);
+      if (!pending || pending.settled) return;
+      pending.error = error ?? "Unknown error";
+      pending.settled = true;
+      pending.resolve();
+    });
   }
 }
