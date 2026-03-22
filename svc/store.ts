@@ -1,14 +1,24 @@
 import { type Kysely } from "kysely";
 
+export interface EventData {
+  from?: string;
+  to?: string;
+  data?: any;
+  returns?: any;
+}
+
 export interface TreeDatabase {
   nodes: {
     id: string;
     parent: string | undefined;
     base: string | undefined;
     checkpoint_id: string | undefined;
+    index: number | undefined;
+  };
+  events: {
+    id: string;
     from: string | undefined;
     to: string | undefined;
-    index: number | undefined;
     data: string | undefined;
     returns: string | undefined;
   };
@@ -53,11 +63,8 @@ export interface TreeStore {
     kvDiffs?: Map<string, string | null>,
     kvReads?: Set<string>,
     base?: string,
-    from?: string,
-    to?: string,
     index?: number,
-    data?: any,
-    returns?: any,
+    event?: EventData,
     derived?: string[],
     effects?: any[],
   ): Promise<void>;
@@ -68,9 +75,9 @@ export interface TreeStore {
       parent: string | undefined;
       base: string | undefined;
       checkpoint_id: string | undefined;
+      index: number | undefined;
       from: string | undefined;
       to: string | undefined;
-      index: number | undefined;
       data: any;
       returns: any;
     } | null
@@ -194,12 +201,18 @@ export async function up(db: Kysely<any>): Promise<void> {
     .addColumn("parent", "text")
     .addColumn("base", "text")
     .addColumn("checkpoint_id", "text")
+    .addColumn("index", "integer")
+    .addPrimaryKeyConstraint("pk_nodes", ["id"])
+    .execute();
+
+  await db.schema
+    .createTable("events")
+    .addColumn("id", "text", (col) => col.notNull())
     .addColumn("from", "text")
     .addColumn("to", "text")
-    .addColumn("index", "integer")
     .addColumn("data", "text")
     .addColumn("returns", "text")
-    .addPrimaryKeyConstraint("pk_nodes", ["id"])
+    .addPrimaryKeyConstraint("pk_events", ["id"])
     .execute();
 
   await db.schema
@@ -261,6 +274,7 @@ export async function up(db: Kysely<any>): Promise<void> {
 
 export async function down(db: Kysely<any>): Promise<void> {
   await db.schema.dropTable("nodes").execute();
+  await db.schema.dropTable("events").execute();
   await db.schema.dropTable("checkpoints").execute();
   await db.schema.dropTable("checkpoint_state").execute();
   await db.schema.dropTable("kv_writes").execute();
@@ -321,11 +335,8 @@ export class SqliteTreeStore implements TreeStore {
     kvDiffs?: Map<string, string | null>,
     kvReads?: Set<string>,
     base?: string,
-    from?: string,
-    to?: string,
     index?: number,
-    data?: any,
-    returns?: any,
+    event?: EventData,
     derived?: string[],
     effects?: any[],
   ): Promise<void> {
@@ -350,14 +361,28 @@ export class SqliteTreeStore implements TreeStore {
         parent,
         base: base ?? parent ?? id,
         checkpoint_id: nodeHasWrites ? undefined : checkpointId,
-        from,
-        to,
         index,
-        data: data !== undefined ? JSON.stringify(data) : undefined,
-        returns: returns !== undefined ? JSON.stringify(returns) : undefined,
       })
       .onConflict((oc) => oc.column("id").doNothing())
       .execute();
+
+    if (event) {
+      await this.db
+        .insertInto("events")
+        .values({
+          id,
+          from: event.from,
+          to: event.to,
+          data: event.data !== undefined
+            ? JSON.stringify(event.data)
+            : undefined,
+          returns: event.returns !== undefined
+            ? JSON.stringify(event.returns)
+            : undefined,
+        })
+        .onConflict((oc) => oc.column("id").doNothing())
+        .execute();
+    }
 
     if (nodeHasWrites) {
       // Insert writes first so they are included in checkpoint state
@@ -430,17 +455,28 @@ export class SqliteTreeStore implements TreeStore {
       parent: string | undefined;
       base: string | undefined;
       checkpoint_id: string | undefined;
+      index: number | undefined;
       from: string | undefined;
       to: string | undefined;
-      index: number | undefined;
       data: any;
       returns: any;
     } | null
   > {
     const row = await this.db
       .selectFrom("nodes")
-      .selectAll()
-      .where("id", "=", id)
+      .leftJoin("events", "nodes.id", "events.id")
+      .select([
+        "nodes.id",
+        "nodes.parent",
+        "nodes.base",
+        "nodes.checkpoint_id",
+        "nodes.index",
+        "events.from as event_from",
+        "events.to as event_to",
+        "events.data as event_data",
+        "events.returns as event_returns",
+      ])
+      .where("nodes.id", "=", id)
       .executeTakeFirst();
     if (!row) return null;
     return {
@@ -448,11 +484,11 @@ export class SqliteTreeStore implements TreeStore {
       parent: row.parent,
       base: row.base,
       checkpoint_id: row.checkpoint_id,
-      from: row.from,
-      to: row.to,
       index: row.index,
-      data: row.data ? JSON.parse(row.data) : undefined,
-      returns: row.returns ? JSON.parse(row.returns) : undefined,
+      from: row.event_from ?? undefined,
+      to: row.event_to ?? undefined,
+      data: row.event_data ? JSON.parse(row.event_data) : undefined,
+      returns: row.event_returns ? JSON.parse(row.event_returns) : undefined,
     };
   }
 

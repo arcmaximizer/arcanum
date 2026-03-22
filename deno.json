@@ -1,6 +1,6 @@
 {
   "tasks": {
-    "dev": "deno run --node-modules-dir --allow-env --allow-read --allow-write --allow-ffi --watch main.ts",
+    "dev": "deno run --node-modules-dir --allow-env --allow-read --allow-write --allow-ffi --unstable-worker-options --watch main.ts",
     "tui": "deno run --allow-all cmd/arcanum_tui.ts",
     "test": "deno test --allow-all --no-check --unstable-worker-options"
   },

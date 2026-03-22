@@ -1,6 +1,7 @@
 import { type Kysely } from "kysely";
 import type {
   CacheService,
+  EventData,
   TraversalState,
   TreeDatabase,
   TreeStore,
@@ -13,9 +14,11 @@ export class ReferenceTreeStore implements TreeStore {
   private nodeData = new Map<string, {
     parent: string | undefined;
     base: string | undefined;
+    index: number | undefined;
+  }>();
+  private eventData = new Map<string, {
     from: string | undefined;
     to: string | undefined;
-    index: number | undefined;
     data: string | undefined;
     returns: string | undefined;
   }>();
@@ -58,11 +61,8 @@ export class ReferenceTreeStore implements TreeStore {
     kvDiffs?: Map<string, string | null>,
     kvReads?: Set<string>,
     base?: string,
-    from?: string,
-    to?: string,
     index?: number,
-    data?: any,
-    returns?: any,
+    event?: EventData,
     derived?: string[],
     effects?: any[],
   ): Promise<void> {
@@ -71,11 +71,19 @@ export class ReferenceTreeStore implements TreeStore {
       this.nodeData.set(id, {
         parent,
         base: base ?? parent ?? id,
-        from,
-        to,
         index,
-        data: data !== undefined ? JSON.stringify(data) : undefined,
-        returns: returns !== undefined ? JSON.stringify(returns) : undefined,
+      });
+    }
+
+    // Store event data if provided
+    if (event && !this.eventData.has(id)) {
+      this.eventData.set(id, {
+        from: event.from,
+        to: event.to,
+        data: event.data !== undefined ? JSON.stringify(event.data) : undefined,
+        returns: event.returns !== undefined
+          ? JSON.stringify(event.returns)
+          : undefined,
       });
     }
 
@@ -118,9 +126,9 @@ export class ReferenceTreeStore implements TreeStore {
       parent: string | undefined;
       base: string | undefined;
       checkpoint_id: string | undefined;
+      index: number | undefined;
       from: string | undefined;
       to: string | undefined;
-      index: number | undefined;
       data: any;
       returns: any;
     } | null
@@ -128,16 +136,17 @@ export class ReferenceTreeStore implements TreeStore {
     const node = this.nodeData.get(id);
     if (!node) return null;
 
+    const event = this.eventData.get(id);
     return {
       id,
       parent: node.parent,
       base: node.base,
       checkpoint_id: undefined, // No checkpoints in reference implementation
-      from: node.from,
-      to: node.to,
       index: node.index,
-      data: node.data ? JSON.parse(node.data) : undefined,
-      returns: node.returns ? JSON.parse(node.returns) : undefined,
+      from: event?.from,
+      to: event?.to,
+      data: event?.data ? JSON.parse(event.data) : undefined,
+      returns: event?.returns ? JSON.parse(event.returns) : undefined,
     };
   }
 
@@ -155,11 +164,7 @@ export class ReferenceTreeStore implements TreeStore {
       this.nodeData.set(child, {
         parent,
         base: parent,
-        from: undefined,
-        to: undefined,
         index: undefined,
-        data: undefined,
-        returns: undefined,
       });
     } else {
       // Update existing node's parent

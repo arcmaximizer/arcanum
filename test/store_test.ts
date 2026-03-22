@@ -37,12 +37,16 @@ Deno.test("createTreeTables creates nodes, checkpoints, kv_writes, and heads tab
   const headsTable = await sql<{ name: string }>`
     SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'heads'
   `.execute(db);
+  const eventsTable = await sql<{ name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'events'
+  `.execute(db);
 
   assertEquals(nodesTable.rows.length, 1);
   assertEquals(checkpointsTable.rows.length, 1);
   assertEquals(checkpointStateTable.rows.length, 1);
   assertEquals(kvWritesTable.rows.length, 1);
   assertEquals(headsTable.rows.length, 1);
+  assertEquals(eventsTable.rows.length, 1);
 
   await db.destroy();
 });
@@ -53,7 +57,7 @@ Deno.test("dropTreeTables removes tables", async () => {
   await dropTreeTables(db);
 
   const tables = await sql<{ name: string }>`
-    SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nodes', 'checkpoints', 'checkpoint_state', 'kv_writes', 'heads')
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('nodes', 'events', 'checkpoints', 'checkpoint_state', 'kv_writes', 'heads')
   `.execute(db);
 
   assertEquals(tables.rows.length, 0);
@@ -872,11 +876,13 @@ Deno.test("addNode stores event fields (from, to, index, data, returns)", async 
     new Map([["foo", "bar"]]),
     undefined,
     undefined,
-    "app-from",
-    "app-to",
     1,
-    { input: "data" },
-    { output: "result" },
+    {
+      from: "app-from",
+      to: "app-to",
+      data: { input: "data" },
+      returns: { output: "result" },
+    },
   );
 
   const details = await store.getNodeDetails("e1");
@@ -901,11 +907,13 @@ Deno.test("addNode stores derived events", async () => {
     new Map([["foo", "bar"]]),
     undefined,
     undefined,
-    "app-from",
-    "app-to",
     1,
-    { input: "data" },
-    { output: "result" },
+    {
+      from: "app-from",
+      to: "app-to",
+      data: { input: "data" },
+      returns: { output: "result" },
+    },
     ["e2", "e3"],
   );
 
@@ -935,11 +943,13 @@ Deno.test("addNode stores effects", async () => {
     new Map([["foo", "bar"]]),
     undefined,
     undefined,
-    "app-from",
-    "app-to",
     1,
-    { input: "data" },
-    { output: "result" },
+    {
+      from: "app-from",
+      to: "app-to",
+      data: { input: "data" },
+      returns: { output: "result" },
+    },
     undefined,
     [{ type: "http", url: "https://example.com" }],
   );
