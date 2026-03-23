@@ -5,7 +5,7 @@ import { generateUUIDv7 } from "../lib/types.ts";
 import type { TreeStore } from "./store.ts";
 import type { PackageStore } from "./packages.ts";
 
-interface EventProposal {
+export interface EventProposal {
   from: ProgramId;
   to: Hash;
   input: Serializable;
@@ -13,9 +13,10 @@ interface EventProposal {
   metadata: Serializable;
 }
 
-interface EventPrecommit extends EventProposal {
+export interface EventPrecommit extends EventProposal {
   id: string;
   base: string;
+  reads: Set<string>;
   diffs: Map<string, string | null>;
   output: Serializable;
   children: EventPrecommit[];
@@ -29,6 +30,7 @@ interface PendingEvent {
   reject: (err: Error) => void;
   settled: boolean;
   base: string;
+  proposal: EventProposal & { base: string };
   timeoutId?: number;
   output?: unknown;
   reads?: string[];
@@ -136,6 +138,7 @@ export default class Runner {
       reject: rejectTree,
       settled: false,
       base: proposal.base,
+      proposal,
     };
     this.pendingEvents.set(eventId, pendingEvent);
 
@@ -167,7 +170,7 @@ export default class Runner {
           timeoutPromise,
         ]);
 
-        return this.buildPrecommit(proposal, eventId, pendingEvent);
+        return this.buildPrecommit(proposal, eventId, pendingEvent, rootId);
       } catch (err) {
         if (!pendingEvent.settled) {
           const eventIds = this.transactions.get(rootId);
@@ -184,7 +187,12 @@ export default class Runner {
       } finally {
         this.store.getCache().removeContention(proposal.base);
         if (pendingEvent.timeoutId) clearTimeout(pendingEvent.timeoutId);
-        this.pendingEvents.delete(eventId);
+        const eventIds = this.transactions.get(rootId);
+        if (eventIds) {
+          for (const childId of eventIds) {
+            this.pendingEvents.delete(childId);
+          }
+        }
         this.transactions.delete(rootId);
       }
     }
@@ -197,13 +205,12 @@ export default class Runner {
         throw new Error(pendingEvent.error);
       }
 
-      return this.buildPrecommit(proposal, eventId, pendingEvent);
+      return this.buildPrecommit(proposal, eventId, pendingEvent, rootId);
     } catch (err) {
       pendingEvent.settled = true;
       throw err;
     } finally {
       this.store.getCache().removeContention(proposal.base);
-      this.pendingEvents.delete(eventId);
     }
   }
 
@@ -211,10 +218,39 @@ export default class Runner {
     proposal: EventProposal & { base: string },
     eventId: string,
     pending: PendingEvent,
+    rootId: string,
   ): EventPrecommit {
+    const children: EventPrecommit[] = [];
+    const eventIds = this.transactions.get(rootId);
+    if (eventIds) {
+      for (const childId of eventIds) {
+        if (childId === eventId) continue;
+        const cp = this.pendingEvents.get(childId);
+        if (cp?.settled && !cp.error) {
+          const cpProposal = cp.proposal;
+          children.push({
+            ...cpProposal,
+            id: childId,
+            base: cp.base,
+            reads: new Set(cp.reads ?? []),
+            diffs: new Map(
+              Object.entries(cp.writes ?? {}).map(([k, v]) => [
+                k,
+                v as string | null,
+              ]),
+            ),
+            output: cp.output as Serializable,
+            children: [],
+            effects: [],
+          });
+        }
+      }
+    }
+
     return {
       ...proposal,
       id: eventId,
+      reads: new Set(pending.reads ?? []),
       diffs: new Map(
         Object.entries(pending.writes ?? {}).map(([k, v]) => [
           k,
@@ -222,7 +258,7 @@ export default class Runner {
         ]),
       ),
       output: pending.output as Serializable,
-      children: [],
+      children,
       effects: [],
     };
   }
