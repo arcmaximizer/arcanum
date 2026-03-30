@@ -1,212 +1,211 @@
-# Mental Model
+# Introduction to Arcanum
 
-This should hopefully help you get a mental model of what exactly Arcanum is and
-how to write code for it.
+Arcanum is an event-sourced app runtime and personal server. It offers zero
+downtime deploys, over-the-air updates, node identity, NAT traversal, an HTTP
+server, event logging and significant extensibility.
 
-Arcanum is a Deno program which maintains many append‑only, git‑like event
-histories with safe branching and compaction. Every app has its own event tree,
-and it is always possible to linearize an event history starting from the
-current head.
+It is designed to ensure that it is easy for developers to program for as well
+as easy for users to set up.
 
-## Terms
+## Prior Art
 
-- Event: a unit of computation representing one invocation of a worker
-- Proposed event: an event not yet added to a line
-- Committed event: an event added to a line
-- Head: a potential head in the current mainline
-- Potential head: an event with no children
-- Child: an event which is ordered after another event in a line
-- Parent: an event that is ordered before another event in a line
-- Event tree: a tree of events, has a root and a head
-- Root: the event with no parent in a given event tree
-- Mainline: linear list of events from the head to the root
-- Line: linear list of events from a potential head to the root
-- Derived event: event which is triggered by an origin event during execution
-- Origin event: event which triggers a derived event during execution
-- Side effect: an output effect run after an event is committed to the mainline
+- Erlang/OTP
+- Cloudflare Workers
+- Urbit
+- Houyhnhnm Computing
 
-## Anatomy of an Event
+## Processes
 
-An event goes through multiple stages before being appended to an app's event
-tree.
+Arcanum follows the actor-model pattern. A **process** is an entity with its own
+state, which communicate with others by passing messages. Processes are meant to
+be cheap and easy to create, and when unused they should not expend memory.
 
-1. Proposal
-2. Execution
-3. Commitment
+Unlike projects such as Erlang/OTP, processes in Arcanum should be thought of as
+more like Cloudflare's Durable Objects: they represent "logical units of
+coordination", and due to JavaScript's own async logic, your app doesn't need a
+new process for every single async task.
 
-When an event is proposed, it looks something like this (pseudodata):
+Examples of good process boundaries include:
 
-```
-type: event
-id: <uuid>
-from: dev/app
-to: dev2/app2
-data: <serializable data>
-```
+- Forum post
+- Chess game
+- Chatroom
 
-After it is executed, it looks like this (pseudodata):
+Examples of bad process boundaries include:
 
-```
-type: committed_event
-id: <uuid>
-parent: <uuid>
-from: dev/app
-to: dev2/app2
-index: 10
-data: <any serializable data>
-returns: <any serializable data>
+- Like
+- Chess piece
+- Message
 
-reads: key, key2, key3, ...
-writes: key: value, key2: value2, key3: value3, ...
-derived: <uuid>, <uuid>, ...
-effects: <effect>, <effect>, ...
-```
+## Execution
 
-- `id` is a unique identifier for the event. It is not based on a cryptographic
-  hash of the event data, but rather generated randomly.
-- `from` and `to` are unique identifiers for the app and versions involved
-- `data` is the data sent to the app in the event
-- `returns` is the data that the app returns
-- `parent` is the identifier of the previous event in the tree.
-- `index` is an incrementing counter equal to the number of ancestors
-- `reads` are the list of state keys read by this event, `writes` are the
-  key-value pairs written by the event
-- `derived` are the IDs of events in other trees that were directly created by
-  this event
-- `effects` are the side effects of the event, executed after a commit
+Process execution is in many ways just like Erlang, and in many others, it has
+nothing alike. This area is the most inspired by Cloudflare Durable Objects.
 
-We call events that were created by a given event _derived events_, and the
-events which create other ones are called _origin events_.
+Process execution is broken into "chunks". A chunk is guaranteed to execute
+synchronously such that there is no interleaving of operations between chunks
+even across normal async boundaries.
 
-During first execution, an event runs against the current state. The execution
-of an event and all of its derived events is treated as an atomic unit, so that
-if one event execution is found to have conflicting state (see below), all the
-changes (including derived events) will be rolled back and the event will be
-re-executed against the latest state.
+In regular JavaScript, when you run a block of synchronous code, it is
+guaranteed that there will be no other code running between operations. This is
+because your computation is a single 'task' in the event loop. However, when
+running Promises, your code is split up into multiple 'tasks' at the promise
+boundary, leading to possible interleaving.
 
-An event is capable of getting input from the outside such as randomness, HTTP
-GET requests, or as responses from events to other runtime extensions, _however_
-all these instances are tracked within Arcanum such that one can always replay
-an event execution against the state.
+```js
+async function doWork(name) {
+  console.log(name, "step 1");
+  await Promise.resolve(); // boundary: yields back to the event loop
+  console.log(name, "step 2");
+}
 
-### Checkpoint Creation Sequence
+doWork("A");
+doWork("B");
 
-_This section was written primarily by OpenCode._
-
-The store implementation uses a specific sequence for checkpoint creation to
-ensure correctness:
-
-1. **Insert the node** with `checkpoint_id: undefined` (since it will have
-   writes)
-2. **Insert the event's writes** into `kv_writes` with a temporary checkpoint ID
-3. **Create the checkpoint** which materializes the state from the lineage
-4. **Update the node** with the new checkpoint ID
-5. **Update the writes** with the correct checkpoint ID
-
-This sequence ensures that:
-
-- The checkpoint includes the event's own writes (not just ancestor writes)
-- The checkpoint state is materialized correctly
-- No race conditions occur during concurrent reads
-
-The implementation differs from a naive approach where writes are inserted after
-checkpoint creation, which would result in checkpoints missing the event's own
-writes.
-
-## Derived Events
-
-A derived event is another event created by the execution of an event. In layman
-terms, it's when you call app A, and app A sends an event to app B.
-
-The app is able to receive the event and then either return a response
-(`returns`) or not. The response will then be copied to the origin event as an
-input.
-
-## Conflict Resolution
-
-Each app is capable of specifying a conflict resolution policy over state. For
-instance, we may want to use OCC (default), or even naive writes.
-
-When an event is first executed, it runs against the state of the entire system
-(the current state of all other event trees touched at that moment). If there is
-a conflict due to a variable being read incorrectly, it will not commit any of
-the derived events as well.
-
-## Code Upgrades
-
-A code upgrade is not strictly an event, but it is a node in the event tree of
-an app. It has a completely different structure from an event.
-
-The structure of a code upgrade is somewhat like this:
-
-```
-type: upgrade
-id: <uuid>
-parent: <uuid>
-index: 11
-code: <uuid>
+// Output:
+// A step 1
+// B step 1
+// A step 2
+// B step 2
 ```
 
-The `code` field is a UUID pointing to code inside the cache.
+Chunks are essentially the same. Arcanum will not create a new chunk when an
+existing chunk is running.
 
-## Runtime extensions
+Storage operations are always considered to be part of the same chunk as well
+as any synchronous operations. However, any other async work such as network
+I/O or message passing results in the current chunk ending, allowing other
+tasks to run.
 
-Runtime extensions are special apps that do not have persistent state tracked by
-the system. They are used as glue code for conducting I/O.
+**Storage operations are not reverted when events throw!**
 
-A runtime extension should be as minimal as possible.
+```js
+class MyProcess extends Process {
+  async foo() {
+    const counter = await kv.get("counter");
+    await kv.set("counter", counter + 1);
 
-## Database Schema Implementation
+    const response = await fetch("https://example.com"); // -- chunk boundary --
+    if (!response.ok) {
+      throw new Error("Fetching failed")
+    }
+    const body = await response.text();
+    console.log("First 100 chars:\n", body.slice(0, 100));
 
-_This section was written primarily by OpenCode._
+    const response2 = await ctx.send("^bob/example", "hi"); // -- chunk boundary --
+    return response2;
+  }
+}
+```
 
-The store implementation uses SQLite with Kysely to persist the event tree.
-Here's how the mental model maps to the actual database schema:
+Standard chunk behavior can be overriden by creating a lock, preventing the
+chunk fron ending until it hits `unlock`, in which case normal chunk behavior
+will apply afterward, or when execution finishes. Use this sparingly becaues you
+could cause slowdowns in your application if all other requests are waiting!
 
-### Nodes Table
+```js
+await ctx.lock()
+// ...
+await ctx.unlock()
+```
 
-- `id`: Unique identifier for the event (matches mental model)
-- `parent`: Parent event ID (matches mental model)
-- `base`: The base event used for state reconstruction (defaults to parent or
-  own ID for root nodes)
-- `checkpoint_id`: ID of the checkpoint materializing this event's state
-- `from`: App identifier where the event originated (matches mental model)
-- `to`: App identifier where the event is sent (matches mental model)
-- `index`: Incrementing counter (matches mental model)
-- `data`: JSON-serialized input data sent to the app (matches mental model)
-- `returns`: JSON-serialized output data returned by the app (matches mental
-  model)
+## Environment
 
-### Key-Value Tables
+Every app runs within a specific worker thread, which is heavily restricted so
+that its only source of I/O is through IPC with the runtime's main thread.
+Processes themselves run within a more restricted environment, which replaces
+various globals with wrappers which log usage or simply removes them.
 
-- `kv_writes`: Stores key-value writes per event, linked to a checkpoint
-- `kv_reads`: Stores keys read per event
-- `checkpoint_state`: Materialized state at checkpoint events
+Notably, here are some web globals which are replaced. For any given I/O, they
+are logged within chunks so they can be replayed or examined later on.
+- Math.random, crypto.*
+- setInterval, setTimeout, clearInterval
+  - In replay, timeouts are ignored as zero
+  - Timeouts and intervals do not persist beyond the end of execution
+- fetch, XMLHttpRequest, WebSocket
+- Date
+- performance
 
-### Derived Events & Effects
+Prototype pollution is also banned. Please do not try to do prototype pollution.
 
-- `derived_events`: Maps origin events to derived events (many-to-many)
-- `effects`: Stores side effects for events
+## Chunk Trees, Events and State
 
-### Checkpoint System
+One major aspect of Arcanum that sets it apart from other systems in this regard
+is the fact that it is natively event-logged. The state of any given process can
+be acquired by traversing the linearized history from a given head.
 
-- Checkpoints materialize the full state at a specific event
-- Checkpoints form a chain via parent relationships
-- The `event_id` in the checkpoints table references the parent checkpoint's
-  event ID (not the current event), enabling efficient state reconstruction
+Due to interleaving, discontinuous chunks from different calls may be appended
+one after the other.
 
-### Base Field Clarification
+```ts
+type ChunkCommit = {
+  executionId: string;  // the current execution
+  chunkSeq: number;     // position within that execution
+  globalSeq: number;    // position across all executions
+}
+```
 
-- The `base` field is used for state reconstruction optimization
-- For root nodes (no parent), `base` defaults to the node's own ID
-- This ensures every event has a defined base for consistent state rebuilding
+Let's say we have our happy little process:
 
-### Cache Service
+```js
+const counter = await kv.get("counter");
+await kv.set("counter", counter + 1);
 
-- Implements contention-based eviction strategy
-- `addContention(eventId)`: Marks that an event is being processed (creates a
-  state snapshot)
-- `removeContention(eventId)`: Marks that event processing is complete
-- **State eviction**: Occurs when contention count reaches zero
-- This ensures state is preserved during event processing and evicted when no
-  longer needed
+const response2 = await ctx.send("^bob/example", "hi"); // -- chunk boundary --
+return response2;
+```
+
+### Runtime Flow
+
+1. The previous chunk (`^bob/app/my-process/11/0`) is committed into the chunk
+   log like this:
+
+```ts
+{
+  executionId: 11,
+  chunkSeq: 0,
+  globalSeq: 24,
+  inputs: [
+    { type: "getKV", name: "counter", value: 5 }
+  ],
+  outputs: [
+    { type: "setKV", name: "counter", value: 6 }
+  ],
+  effects: [
+    { type: "sendCrossApp", to: "^bob/example", data: "hi" }
+  ]
+}
+```
+
+2. The runtime reads the `effects` list and then sends `^bob/example` a message
+   at its entrypoint:
+
+```ts
+{
+  type: "request",
+  from: "^bob/app",
+  to: "^bob/example",
+  replyTo: "^bob/app/my-process/11/1",
+  data: "hi"
+}
+```
+
+3. `^bob/example` does something and returns a result. The execution is then
+   committed.
+
+```ts
+{
+  type: "response",
+  from: "^bob/example",
+  to: "^bob/app/my-process/11/1",
+  data: "Hello world!"
+}
+```
+
+Let's say we start our Arcanum up after shutting it down mid-execution. Here's
+what the runtime conceptually does:
+
+1. Load all app workers
+2. Step through all chunk commits
+
+## Communication

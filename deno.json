@@ -5,7 +5,6 @@
     "test": "deno test --allow-all --no-check --unstable-worker-options"
   },
   "imports": {
-    "@cliffy/keypress": "jsr:@cliffy/keypress",
     "@db/sqlite": "jsr:@db/sqlite@^0.13.0",
     "@sha1n/dagraph": "npm:@sha1n/dagraph@^0.3.1",
     "@std/assert": "jsr:@std/assert@1",
