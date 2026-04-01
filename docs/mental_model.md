@@ -155,53 +155,6 @@ const response2 = await ctx.send("^bob/example", "hi"); // -- chunk boundary --
 return response2;
 ```
 
-### Runtime Flow
-
-1. The previous chunk (`^bob/app/my-process/11/0`) is committed into the chunk
-   log like this:
-
-```ts
-{
-  executionId: 11,
-  chunkSeq: 0,
-  globalSeq: 24,
-  inputs: [
-    { type: "getKV", name: "counter", value: 5 }
-  ],
-  outputs: [
-    { type: "setKV", name: "counter", value: 6 }
-  ],
-  effects: [
-    { type: "sendCrossApp", to: "^bob/example", data: "hi" }
-  ]
-}
-```
-
-2. The runtime reads the `effects` list and then sends `^bob/example` a message
-   at its entrypoint:
-
-```ts
-{
-  type: "request",
-  from: "^bob/app",
-  to: "^bob/example",
-  replyTo: "^bob/app/my-process/11/1",
-  data: "hi"
-}
-```
-
-3. `^bob/example` does something and returns a result. The execution is then
-   committed.
-
-```ts
-{
-  type: "response",
-  from: "^bob/example",
-  to: "^bob/app/my-process/11/1",
-  data: "Hello world!"
-}
-```
-
 Let's say we start our Arcanum up after shutting it down mid-execution. Here's
 what the runtime conceptually does:
 
