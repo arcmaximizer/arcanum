@@ -4,15 +4,31 @@ Arcanum is an event-sourced app runtime and personal server. It offers zero
 downtime deploys, over-the-air updates, node identity, NAT traversal, an HTTP
 server, event logging and significant extensibility.
 
-It is designed to ensure that it is easy for developers to program for as well
-as easy for users to set up.
-
 ## Prior Art
 
 - Erlang/OTP
 - Cloudflare Workers
 - Urbit
 - Houyhnhnm Computing
+
+## Generators
+
+Arcanum uses a **generator-based** API. These go in the format:
+
+```ts
+function* app() {
+  const count = yield kv.get("count") ?? 0
+  yield kv.set("count", count + 1)
+}
+```
+
+This is due to the developer's lack of skill. A Promise-based API would be
+preferred, but unfortunately this is the only good way I've found to avoid any
+undefined behavior involving chunks.
+
+As a result, you will not be able to use most libraries with Arcanum code and
+porting existing libraries or tooling will be significantly more difficult! I
+apologize in advance.
 
 ## Processes
 
@@ -81,18 +97,18 @@ tasks to run.
 
 ```js
 class MyProcess extends Process {
-  async foo() {
-    const counter = await kv.get("counter");
-    await kv.set("counter", counter + 1);
+  async foo*() {
+    const counter = yield kv.get("counter") ?? 0;
+    yield kv.set("counter", counter + 1);
 
-    const response = await fetch("https://example.com"); // -- chunk boundary --
+    const response = yield ctx.fetch("https://example.com"); // -- chunk boundary --
     if (!response.ok) {
       throw new Error("Fetching failed")
     }
     const body = await response.text();
     console.log("First 100 chars:\n", body.slice(0, 100));
 
-    const response2 = await ctx.send("^bob/example", "hi"); // -- chunk boundary --
+    const response2 = yield ctx.send("^bob/example", "hi"); // -- chunk boundary --
     return response2;
   }
 }
@@ -104,9 +120,9 @@ will apply afterward, or when execution finishes. Use this sparingly becaues you
 could cause slowdowns in your application if all other requests are waiting!
 
 ```js
-await ctx.lock()
+yield ctx.lock()
 // ...
-await ctx.unlock()
+yield ctx.unlock()
 ```
 
 ## Environment
@@ -119,12 +135,15 @@ various globals with wrappers which log usage or simply removes them.
 Notably, here are some web globals which are replaced. For any given I/O, they
 are logged within chunks so they can be replayed or examined later on.
 - Math.random, crypto.*
+- Date
+- performance
+
+The following are removed entirely, replaced by calls to `ctx` or removed
+entirely:
+- fetch, XMLHttpRequest, WebSocket
 - setInterval, setTimeout, clearInterval
   - In replay, timeouts are ignored as zero
   - Timeouts and intervals do not persist beyond the end of execution
-- fetch, XMLHttpRequest, WebSocket
-- Date
-- performance
 
 Prototype pollution is also banned. Please do not try to do prototype pollution.
 
@@ -142,23 +161,26 @@ type ChunkCommit = {
   executionId: string;  // the current execution
   chunkSeq: number;     // position within that execution
   globalSeq: number;    // position across all executions
+  inputs: BaseIO[];
+  outputs: BaseIO[];
+  effects: BaseEffect[];
+  end: false;
 }
+
+type BaseIO = { type: string }
+type BaseEffect = { type: string, key: string }
 ```
 
 Let's say we have our happy little process:
 
 ```js
-const counter = await kv.get("counter");
-await kv.set("counter", counter + 1);
+const counter = yield kv.get("counter");
+yield kv.set("counter", counter + 1);
 
-const response2 = await ctx.send("^bob/example", "hi"); // -- chunk boundary --
+const response2 = yield ctx.send("^bob/example", "hi"); // -- chunk boundary --
 return response2;
 ```
 
-Let's say we start our Arcanum up after shutting it down mid-execution. Here's
-what the runtime conceptually does:
-
-1. Load all app workers
-2. Step through all chunk commits
+Then we send it a message in the inbox.
 
 ## Communication
