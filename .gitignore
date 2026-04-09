@@ -4,3 +4,8 @@ node_modules
 .gitignore
 *.db
 coverage
+
+
+# Added by cargo
+
+/target

@@ -1,0 +1,15 @@
+[package]
+name = "workspace"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+rusqlite = "0.32"
+deno_core = "0.258"
+bytes = "1.11.1"
+anyhow = "1.0.102"
+sha2 = "0.11.0"
+tar = "0.4.45"
+flate2 = "1.1.9"
+diesel = { version = "2.1", features = ["sqlite"] }
