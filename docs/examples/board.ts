@@ -1,92 +1,58 @@
-// Arcchan: a publicly available message board over Arcnet
-// This is demo software!
-import { ctx, lists, Process, process } from "@arcanum/std";
+import { ctx, lists } from "@arcanum/std";
 
-export default async function entrypoint(req) {
-  const proc = ctx.from;
-  if (proc == "sys/arcnet") {
-    return await handle(req);
-  } else {
-    const data = { from: ctx.node, ...req };
-    return await handle(data);
-  }
+export const processes = {
+  board: {
+    id: "board",
+    handler: async (ctx, msg) => {
+      const { type, ...args } = msg;
+
+      switch (type) {
+        case "addPost":
+          return addPost(args.content);
+        case "addComment":
+          return addComment(args.target, args.content);
+        case "getPosts":
+          return getPosts(args.count, args.cursor);
+        case "getPost":
+          return getPost(args.target);
+      }
+    },
+  },
+};
+
+async function addPost(content: string) {
+  return lists.posts.append({
+    from: ctx.id,
+    content,
+    time: Date.now(),
+  });
 }
 
-async function handle(req) {
-  const { from, data } = req;
-  if (!data.board) throw new Error("No board");
-
-  // Processes are cheap
-  const board: Board = ctx.getProcess("board", data.board);
-
-  switch (data.type) {
-    case "post": {
-      return await board.post(from, data.content);
-    }
-    case "comment": {
-      return await board.comment(from, data.target, data.content);
-    }
-    case "getPosts": {
-      return await board.getPosts(data.count, data.cursor);
-    }
-    case "getPost": {
-      return await board.getPost(data.target);
-    }
-    default: {
-      // We have no idea what's going on, throw
-      throw new Error("Invalid request");
-    }
-  }
+async function addComment(target: number, content: string) {
+  return lists.comments.append({
+    target,
+    from: ctx.id,
+    content,
+    time: Date.now(),
+  });
 }
-@process("board")
-class Board implements Process {
-  async post(from: string, content: string) {
-    const id = await lists.posts.append({
-      from,
-      content,
-      time: Date.now(),
-    });
-    return id;
-  }
-  async comment(from: string, target: number, content: string) {
-    const id = await lists.comments.append({
-      target,
-      from,
-      content,
-      time: Date.now(),
-    });
-    return id;
-  }
-  async getPosts(count: number, cursor?: number) {
-    if (count > 100) throw new Error("Max count: 100");
 
-    // Find a list of posts
-    const posts = await lists.posts.find({
-      condition: `id < ${cursor}`,
-      maxResults: count,
-      sort: "desc",
-      extras: {
-        // Returns { id: number, ... }
-        // This will throw an error if any element already has the "id" property
-        appendId: true,
-      },
-    });
+async function getPosts(count: number, cursor?: number) {
+  if (count > 100) throw new Error("Max count: 100");
 
-    return posts;
-  }
+  return lists.posts.find({
+    condition: `id < ${cursor}`,
+    maxResults: count,
+    sort: "desc",
+    extras: { appendId: true },
+  });
+}
 
-  async getPost(target: number) {
-    const post = await lists.posts.get(target);
-    const comments = await lists.comments.find({
-      condition: `target = ${target}`,
-      extras: {
-        appendId: true,
-      },
-    });
-
-    return {
-      post,
-      comments,
-    };
-  }
+async function getPost(target: number) {
+  const post = lists.posts.get(target);
+  const comments = lists.comments.find({
+    condition: `target = ${target}`,
+    extras: { appendId: true },
+  });
+  return { post, comments };
 }

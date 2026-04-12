@@ -19,29 +19,35 @@ pub trait Log {
 }
 
 pub struct InMemoryLog {
-    chunks: HashMap<ProcessId, Vec<Chunk>>,
-    events: HashMap<ProcessId, Vec<Event>>,
-    event_id_to_chunks: HashMap<EventId, Vec<u64>>,
-    queue: HashMap<ProcessId, VecDeque<EventId>>,
-    running: BTreeMap<u64, EventId>,
+    process_chunks: HashMap<ProcessId, Vec<Chunk>>,
+    process_events: HashMap<ProcessId, Vec<Event>>,
+    event_id_chunks: HashMap<EventId, Vec<u64>>,
+    process_queue: HashMap<ProcessId, VecDeque<EventId>>,
+    running: BTreeMap<EventId, ()>,
 }
 
 impl Log for InMemoryLog {
     fn add_chunk(&mut self, chunk: Chunk) -> Result<u64> {
         let process = &chunk.event_id.proc;
 
-        let events = self.events.entry(process.clone()).or_insert_with(Vec::new);
-        let process_chunk_log = self.chunks.entry(process.clone()).or_insert_with(Vec::new);
+        let process_events = self
+            .process_events
+            .entry(process.clone())
+            .or_insert_with(Vec::new);
+        let process_chunk_log = self
+            .process_chunks
+            .entry(process.clone())
+            .or_insert_with(Vec::new);
         let event_chunk_log = self
-            .event_id_to_chunks
+            .event_id_chunks
             .entry(chunk.event_id.clone())
             .or_insert_with(Vec::new);
 
-        if chunk.event_id.seq as usize > events.len() {
+        if chunk.event_id.seq as usize >= process_events.len() {
             bail!("no event")
         }
 
-        let event = &mut events[chunk.event_id.seq as usize];
+        let event = &mut process_events[chunk.event_id.seq as usize];
 
         if chunk.log_seq != process_chunk_log.len() as u64 {
             bail!("chunk ID mismatch")
@@ -57,17 +63,16 @@ impl Log for InMemoryLog {
 
         if chunk.chunk_seq == 0 {
             let queue = self
-                .queue
+                .process_queue
                 .entry(chunk.event_id.proc.clone())
                 .or_insert_with(VecDeque::new);
             queue.retain(|e| e.seq != chunk.event_id.seq);
-            self.running
-                .insert(chunk.event_id.seq, chunk.event_id.clone());
+            self.running.insert(chunk.event_id.clone(), ());
         }
 
-        if let ChunkStatus::End(data) = chunk.status.clone() {
-            event.status = EventStatus::Completed(data);
-            self.running.remove(&chunk.event_id.seq);
+        if let ChunkStatus::End(data) = &chunk.status {
+            event.status = EventStatus::Completed(data.clone());
+            self.running.remove(&chunk.event_id);
         }
 
         let seq = chunk.log_seq;
@@ -78,33 +83,37 @@ impl Log for InMemoryLog {
     }
     fn add_event(&mut self, event: Event) -> Result<u64> {
         let process = &event.id.proc;
-        let events = self.events.entry(process.clone()).or_insert_with(Vec::new);
+        let process_events = self
+            .process_events
+            .entry(process.clone())
+            .or_insert_with(Vec::new);
 
-        if event.id.seq != events.len() as u64 {
+        if event.id.seq != process_events.len() as u64 {
             bail!("event ID mismatch")
         }
 
         match &event.status {
             EventStatus::Pending => {
-                self.queue
+                self.process_queue
                     .entry(event.id.proc.clone())
                     .or_insert_with(VecDeque::new)
                     .push_back(event.id.clone());
             }
             EventStatus::Running => {
-                self.running.insert(event.id.seq, event.id.clone());
+                self.running.insert(event.id.clone(), ());
             }
             _ => {}
         }
 
-        events.push(event.clone());
-        Ok(event.id.seq)
+        let seq = event.id.seq;
+        process_events.push(event);
+        Ok(seq)
     }
     fn get_chunk_in_event(&self, event_id: EventId, chunk_seq: u64) -> Option<Chunk> {
-        let chunk_seqs = self.event_id_to_chunks.get(&event_id)?;
+        let chunk_seqs = self.event_id_chunks.get(&event_id)?;
         let &log_seq = chunk_seqs.get(chunk_seq as usize)?;
         let process = &event_id.proc;
-        let chunks = self.chunks.get(process)?;
+        let chunks = self.process_chunks.get(process)?;
         chunks.get(log_seq as usize).cloned()
     }
     fn get_chunk_in_log(&self, app_id: String, proc_id: String, log_seq: u64) -> Option<Chunk> {
@@ -112,13 +121,13 @@ impl Log for InMemoryLog {
             app: app_id,
             proc: proc_id,
         };
-        let chunks = self.chunks.get(&process)?;
+        let chunks = self.process_chunks.get(&process)?;
         chunks.get(log_seq as usize).cloned()
     }
     fn get_chunks_in_event(&self, event_id: EventId) -> Option<Vec<Chunk>> {
-        let chunk_seqs = self.event_id_to_chunks.get(&event_id)?;
+        let chunk_seqs = self.event_id_chunks.get(&event_id)?;
         let process = &event_id.proc;
-        let chunks = self.chunks.get(process)?;
+        let chunks = self.process_chunks.get(process)?;
         let result: Vec<Chunk> = chunk_seqs
             .iter()
             .filter_map(|&log_seq| chunks.get(log_seq as usize).cloned())
@@ -128,10 +137,10 @@ impl Log for InMemoryLog {
     fn get_running_events(&self) -> Option<Vec<Event>> {
         let result: Vec<Event> = self
             .running
-            .values()
+            .keys()
             .filter_map(|event_id| {
-                let events = self.events.get(&event_id.proc)?;
-                events.get(event_id.seq as usize).cloned()
+                let process_events = self.process_events.get(&event_id.proc)?;
+                process_events.get(event_id.seq as usize).cloned()
             })
             .collect();
         Some(result)
@@ -141,11 +150,11 @@ impl Log for InMemoryLog {
             app: app_id,
             proc: proc_id,
         };
-        let queue = self.queue.get(&process)?;
-        let events = self.events.get(&process)?;
+        let queue = self.process_queue.get(&process)?;
+        let process_events = self.process_events.get(&process)?;
         let result: Vec<Event> = queue
             .iter()
-            .filter_map(|event_id| events.get(event_id.seq as usize).cloned())
+            .filter_map(|event_id| process_events.get(event_id.seq as usize).cloned())
             .collect();
         Some(result)
     }
@@ -200,13 +209,13 @@ pub enum StateChange {
     KVSet { key: String, value: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct EventId {
     proc: ProcessId,
     seq: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct ProcessId {
     app: String,
     proc: String,

@@ -11,25 +11,6 @@ server, event logging and significant extensibility.
 - Urbit
 - Houyhnhnm Computing
 
-## Generators
-
-Arcanum uses a **generator-based** API. These go in the format:
-
-```ts
-function* app() {
-  const count = yield kv.get("count") ?? 0
-  yield kv.set("count", count + 1)
-}
-```
-
-This is due to the developer's lack of skill. A Promise-based API would be
-preferred, but unfortunately this is the only good way I've found to avoid any
-undefined behavior involving chunks.
-
-As a result, you will not be able to use most libraries with Arcanum code and
-porting existing libraries or tooling will be significantly more difficult! I
-apologize in advance.
-
 ## Processes
 
 Arcanum follows the actor-model pattern. A **process** is an entity with its own
@@ -52,6 +33,14 @@ Examples of bad process boundaries include:
 - Like
 - Chess piece
 - Message
+
+When writing code, what you are writing is a **process handler**. This is a
+chunk of code that serves sort of like a "template" for a process: you can have
+many different processes based on that.
+
+Every app has a special **entrypoint** process. When defining the entrypoint
+handler, note that it is guaranteed you will only have one instance of it and
+that it will be addressable by a call to the app's name, like `^arc/my-app`.
 
 ## Execution
 
@@ -96,50 +85,50 @@ tasks to run.
 **Storage operations are not reverted when events throw!**
 
 ```js
-class MyProcess extends Process {
-  async foo*() {
-    const counter = yield kv.get("counter") ?? 0;
-    yield kv.set("counter", counter + 1);
+export const processes = {
+  myProcess: {
+    id: "myProcess",
+    handler: async (ctx, msg) => {
+      const counter = (await ctx.kv.get("counter")) ?? 0;
+      await ctx.kv.set("counter", counter + 1);
 
-    const response = yield ctx.fetch("https://example.com"); // -- chunk boundary --
-    if (!response.ok) {
-      throw new Error("Fetching failed")
-    }
-    const body = await response.text();
-    console.log("First 100 chars:\n", body.slice(0, 100));
+      const response = await fetch("https://example.com"); // -- chunk boundary --
+      if (!response.ok) {
+        throw new Error("Fetching failed");
+      }
+      const body = await response.text();
+      console.log("First 100 chars:\n", body.slice(0, 100));
 
-    const response2 = yield ctx.send("^bob/example", "hi"); // -- chunk boundary --
-    return response2;
-  }
-}
+      const response2 = await ctx.send("^bob/example", "hi"); // -- chunk boundary --
+      return response2;
+    },
+  },
+};
 ```
 
 Standard chunk behavior can be overriden by creating a lock, preventing the
-chunk fron ending until it hits `unlock`, in which case normal chunk behavior
-will apply afterward, or when execution finishes. Use this sparingly becaues you
+chunk from ending until it hits `unlock`, in which case normal chunk behavior
+will apply afterward, or when execution finishes. Use this sparingly because you
 could cause slowdowns in your application if all other requests are waiting!
 
 ```js
-yield ctx.lock()
+await ctx.lock();
 // ...
-yield ctx.unlock()
+await ctx.unlock();
 ```
 
 ## Environment
 
-Every app runs within a specific worker thread, which is heavily restricted so
-that its only source of I/O is through IPC with the runtime's main thread.
-Processes themselves run within a more restricted environment, which replaces
-various globals with wrappers which log usage or simply removes them.
+Every process runs within a V8 isolate of its own. Like Cloudflare Workers,
+they may be evicted at any time, so there should be no behavior that requires
+long-running tasks. Globals common in the Web and other environments are not
+guaranteed to be present in the Arcanum environment.
 
 Notably, here are some web globals which are replaced. For any given I/O, they
 are logged within chunks so they can be replayed or examined later on.
 - Math.random, crypto.*
 - Date
 - performance
-
-The following are removed entirely, replaced by calls to `ctx` or removed
-entirely:
 - fetch, XMLHttpRequest, WebSocket
 - setInterval, setTimeout, clearInterval
   - In replay, timeouts are ignored as zero
@@ -156,31 +145,6 @@ be acquired by traversing the linearized history from a given head.
 Due to interleaving, discontinuous chunks from different calls may be appended
 one after the other.
 
-```ts
-type ChunkCommit = {
-  executionId: string;  // the current execution
-  chunkSeq: number;     // position within that execution
-  globalSeq: number;    // position across all executions
-  inputs: BaseIO[];
-  outputs: BaseIO[];
-  effects: BaseEffect[];
-  end: false;
-}
+## WIP
 
-type BaseIO = { type: string }
-type BaseEffect = { type: string, key: string }
-```
-
-Let's say we have our happy little process:
-
-```js
-const counter = yield kv.get("counter");
-yield kv.set("counter", counter + 1);
-
-const response2 = yield ctx.send("^bob/example", "hi"); // -- chunk boundary --
-return response2;
-```
-
-Then we send it a message in the inbox.
-
-## Communication
+This entire document, like the other docs, is a massive work in progress!
