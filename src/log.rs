@@ -19,11 +19,11 @@ pub trait Log {
 }
 
 pub struct InMemoryLog {
-    process_chunks: HashMap<ProcessId, Vec<Chunk>>,
-    process_events: HashMap<ProcessId, Vec<Event>>,
-    event_id_chunks: HashMap<EventId, Vec<u64>>,
-    process_queue: HashMap<ProcessId, VecDeque<EventId>>,
-    running: BTreeMap<EventId, ()>,
+    pub process_chunks: HashMap<ProcessId, Vec<Chunk>>,
+    pub process_events: HashMap<ProcessId, Vec<Event>>,
+    pub event_id_chunks: HashMap<EventId, Vec<u64>>,
+    pub process_queue: HashMap<ProcessId, VecDeque<EventId>>,
+    pub running: BTreeMap<EventId, ()>,
 }
 
 impl Log for InMemoryLog {
@@ -211,14 +211,14 @@ pub enum StateChange {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct EventId {
-    proc: ProcessId,
-    seq: u64,
+    pub proc: ProcessId,
+    pub seq: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd, serde::Deserialize)]
 pub struct ProcessId {
-    app: String,
-    proc: String,
+    pub app: String,
+    pub proc: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -242,4 +242,16 @@ pub struct Event {
 pub struct ChunkInput {
     pub itype: String,
     pub value: String,
+}
+
+impl Default for InMemoryLog {
+    fn default() -> Self {
+        Self {
+            process_chunks: HashMap::new(),
+            process_events: HashMap::new(),
+            event_id_chunks: HashMap::new(),
+            process_queue: HashMap::new(),
+            running: BTreeMap::new(),
+        }
+    }
 }

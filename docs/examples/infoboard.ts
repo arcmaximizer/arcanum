@@ -1,15 +1,18 @@
-import { ctx, kv } from "@arcanum/std";
-
 export const processes = {
   infoboard: {
     id: "infoboard",
     handler: async (ctx, msg) => {
+      const kv = ctx.kv;
       const ready = await kv.get("ready");
 
       switch (msg.type) {
         case "get": {
           return ready
-            ? { name: await kv.get("name"), bio: await kv.get("bio"), links: await kv.get("links") }
+            ? {
+              name: await kv.get("name"),
+              bio: await kv.get("bio"),
+              links: await kv.get("links"),
+            }
             : { name: "N/A", bio: "Not set up yet." };
         }
         case "setBio": {

@@ -1,5 +1,3 @@
-import { ctx, kv } from "@arcanum/std";
-
 const FORTUNES = [
   "You will write clean code today.",
   "A refactor is in your future.",
@@ -15,9 +13,9 @@ export const processes = {
   fortune: {
     id: "fortune",
     handler: async (ctx, msg) => {
-      const index = (await kv.get("index")) ?? 0;
+      const index = (await ctx.kv.get("index")) ?? 0;
       const fortune = FORTUNES[index % FORTUNES.length];
-      await kv.set("index", index + 1);
+      await ctx.kv.set("index", index + 1);
       return fortune;
     },
   },

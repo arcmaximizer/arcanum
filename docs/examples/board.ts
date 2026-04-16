@@ -1,5 +1,3 @@
-import { ctx, lists } from "@arcanum/std";
-
 export const processes = {
   board: {
     id: "board",
@@ -21,7 +19,7 @@ export const processes = {
 };
 
 async function addPost(content: string) {
-  return lists.posts.append({
+  return ctx.lists.posts.append({
     from: ctx.id,
     content,
     time: Date.now(),
@@ -29,7 +27,7 @@ async function addPost(content: string) {
 }
 
 async function addComment(target: number, content: string) {
-  return lists.comments.append({
+  return ctx.lists.comments.append({
     target,
     from: ctx.id,
     content,
@@ -40,7 +38,7 @@ async function addComment(target: number, content: string) {
 async function getPosts(count: number, cursor?: number) {
   if (count > 100) throw new Error("Max count: 100");
 
-  return lists.posts.find({
+  return ctx.lists.posts.find({
     condition: `id < ${cursor}`,
     maxResults: count,
     sort: "desc",
@@ -49,8 +47,8 @@ async function getPosts(count: number, cursor?: number) {
 }
 
 async function getPost(target: number) {
-  const post = lists.posts.get(target);
-  const comments = lists.comments.find({
+  const post = ctx.lists.posts.get(target);
+  const comments = ctx.lists.comments.find({
     condition: `target = ${target}`,
     extras: { appendId: true },
   });
