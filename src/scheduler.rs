@@ -75,7 +75,6 @@ impl Scheduler for InMemoryScheduler {
     fn satisfy_proposal(&mut self, proposal: &Proposal, receipt: Receipt) -> Result<NextAction> {
         // This should always validate data to ensure that any state transitions always follow some
         // invariants. Keep effects at the end in case of reverts and use transactions if possible.
-        // Todo: list these invariants someday
 
         // Extract values needed for validation before taking any mutable borrows
         let process = &proposal.process;
@@ -92,14 +91,8 @@ impl Scheduler for InMemoryScheduler {
             .schedule
             .entry(process.clone())
             .or_insert(VecDeque::new());
-        let event_chunks = self
-            .event_chunks
-            .entry(event.clone())
-            .or_insert(vec![]);
-        let process_chunks = self
-            .process_chunks
-            .entry(process.clone())
-            .or_insert(vec![]);
+        let event_chunks = self.event_chunks.entry(event.clone()).or_insert(vec![]);
+        let process_chunks = self.process_chunks.entry(process.clone()).or_insert(vec![]);
 
         // Proposal checks
         let first_proposal = schedule
@@ -167,19 +160,8 @@ impl Scheduler for InMemoryScheduler {
         let root_chunk = event_chunks.first().unwrap().clone();
         let promise = root_chunk.proposal.promise.clone();
         let root_returns = root_chunk.returns.clone();
+        let promise_target = promise.as_ref().map(|p| p.target.clone());
 
-        let source_chunk_data = if let Some(ref p) = promise {
-            // Query the chunk data in the promise
-            let source_event = p.target;
-            self.event_chunks
-                .get(&source_event)
-                .and_then(|chunks| chunks.first())
-                .map(|chunk| (source_event, chunk.proposal.process.clone()))
-        } else {
-            None
-        };
-
-        // Effects
         schedule.pop_front();
 
         event_chunks.push(receipt.clone());
@@ -188,6 +170,15 @@ impl Scheduler for InMemoryScheduler {
             .entry(process.clone())
             .or_insert(vec![])
             .push(receipt);
+
+        let source_chunk_data = if let Some(ref target) = promise_target {
+            self.event_chunks
+                .get(target)
+                .and_then(|chunks| chunks.first())
+                .map(|chunk| (target.clone(), chunk.proposal.process.clone()))
+        } else {
+            None
+        };
 
         for nt in notif_proposals {
             self.schedule

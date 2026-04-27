@@ -1,5 +1,4 @@
 use crate::log::Event;
-use async_stream::stream;
 use futures::Stream;
 
 trait Executor {
