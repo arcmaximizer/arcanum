@@ -1,5 +1,7 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+
+// LEGACY CODE - This is no longer representative of the system
 
 pub trait Log {
     /// Adds a chunk to the log. Returns the chunk's log_seq on success.

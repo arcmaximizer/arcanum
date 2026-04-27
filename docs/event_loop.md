@@ -4,6 +4,18 @@
 
 Arcanum processes events sequentially using an event-sourced model. Every state change is captured as a chunk in a durable log, enabling crash recovery and replay.
 
+## Invariants
+
+The scheduler enforces the following invariants to ensure correct state transitions:
+
+1. **Proposal match**: The proposal being satisfied must match the first proposal in the schedule
+2. **Chunk alignment (log)**: `in_log_seq` must equal the current process chunk history length
+3. **Chunk alignment (event)**: `in_event_seq` must equal the current event chunk length
+4. **Event continuity**: If `in_event_seq > 0`, the previous chunk must end with a `Call` syscall (events cannot end mid-chunk)
+5. **Process consistency**: If `in_event_seq > 0`, the chunk's process must match the previous chunk's process
+6. **Single call**: Only one `Call` syscall is allowed per receipt
+7. **Call position**: `Call` must be the last syscall in the list
+
 ## Atomicity
 
 When multiple steps are grouped together, they are atomic - either all succeed or none do. The system never has half-completed state, even if it crashes mid-operation.

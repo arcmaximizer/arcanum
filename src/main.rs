@@ -1,4 +1,3 @@
-mod log;
 mod scheduler;
 mod state;
 mod store;
