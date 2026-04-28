@@ -1,4 +1,4 @@
-use crate::log::ProcessId;
+use crate::types::ProcessId;
 use std::collections::HashMap;
 
 pub trait KVState {
