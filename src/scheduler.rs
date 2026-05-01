@@ -1,6 +1,50 @@
 use crate::types::{EventId, ProcessId};
 use anyhow::{Result, anyhow, bail};
 use std::collections::{HashMap, VecDeque};
+use tokio::sync::mpsc;
+
+#[derive(Debug)]
+pub enum SchedulerMsg {
+    AddProposal {
+        proposal: Proposal,
+        resp: tokio::sync::oneshot::Sender<u64>,
+    },
+    GetNext {
+        process: ProcessId,
+        resp: tokio::sync::oneshot::Sender<Option<Proposal>>,
+    },
+    Satisfy {
+        proposal: Proposal,
+        receipt: Receipt,
+        resp: tokio::sync::oneshot::Sender<Result<NextAction>>,
+    },
+}
+
+pub async fn run_scheduler(
+    mut rx: mpsc::UnboundedReceiver<SchedulerMsg>,
+    mut scheduler: Box<dyn Scheduler + Send>,
+) {
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            SchedulerMsg::AddProposal { proposal, resp } => {
+                let id = scheduler.add_proposal(proposal);
+                let _ = resp.send(id);
+            }
+            SchedulerMsg::GetNext { process, resp } => {
+                let proposal = scheduler.get_next_proposal(&process).cloned();
+                let _ = resp.send(proposal);
+            }
+            SchedulerMsg::Satisfy {
+                proposal,
+                receipt,
+                resp,
+            } => {
+                let result = scheduler.satisfy_proposal(&proposal, receipt);
+                let _ = resp.send(result);
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Receipt {
@@ -57,6 +101,18 @@ pub struct InMemoryScheduler {
     pub schedule: HashMap<ProcessId, VecDeque<Proposal>>,
     pub event_counter: HashMap<ProcessId, u64>,
     pub proposal_counter: u64,
+}
+
+impl InMemoryScheduler {
+    pub fn new() -> Self {
+        Self {
+            event_chunks: HashMap::new(),
+            process_chunks: HashMap::new(),
+            schedule: HashMap::new(),
+            event_counter: HashMap::new(),
+            proposal_counter: 0,
+        }
+    }
 }
 
 impl Scheduler for InMemoryScheduler {
