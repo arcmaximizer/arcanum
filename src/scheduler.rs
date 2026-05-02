@@ -9,9 +9,20 @@ pub enum SchedulerMsg {
         proposal: Proposal,
         resp: tokio::sync::oneshot::Sender<u64>,
     },
+    RegisterExecutor {
+        process: ProcessId,
+        tx: mpsc::UnboundedSender<Proposal>,
+    },
+    UnregisterExecutor {
+        process: ProcessId,
+    },
     GetNext {
         process: ProcessId,
         resp: tokio::sync::oneshot::Sender<Option<Proposal>>,
+    },
+    GetChunks {
+        event: EventId,
+        resp: tokio::sync::oneshot::Sender<Option<Vec<Receipt>>>,
     },
     Satisfy {
         proposal: Proposal,
@@ -24,15 +35,31 @@ pub async fn run_scheduler(
     mut rx: mpsc::UnboundedReceiver<SchedulerMsg>,
     mut scheduler: Box<dyn Scheduler + Send>,
 ) {
+    let mut executor_senders: HashMap<ProcessId, mpsc::UnboundedSender<Proposal>> = HashMap::new();
+
     while let Some(msg) = rx.recv().await {
         match msg {
             SchedulerMsg::AddProposal { proposal, resp } => {
-                let id = scheduler.add_proposal(proposal);
+                let process = proposal.process.clone();
+                let id = scheduler.add_proposal(proposal.clone());
                 let _ = resp.send(id);
+                if let Some(tx) = executor_senders.get(&process) {
+                    let _ = tx.send(proposal);
+                }
+            }
+            SchedulerMsg::RegisterExecutor { process, tx } => {
+                executor_senders.insert(process, tx);
+            }
+            SchedulerMsg::UnregisterExecutor { process } => {
+                executor_senders.remove(&process);
             }
             SchedulerMsg::GetNext { process, resp } => {
                 let proposal = scheduler.get_next_proposal(&process).cloned();
                 let _ = resp.send(proposal);
+            }
+            SchedulerMsg::GetChunks { event, resp } => {
+                let chunks = scheduler.get_chunks_from_event(&event).cloned();
+                let _ = resp.send(chunks);
             }
             SchedulerMsg::Satisfy {
                 proposal,

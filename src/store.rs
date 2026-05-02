@@ -6,8 +6,63 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use tar::Archive;
+use tokio::sync::mpsc;
 
 pub type HashKey = [u8; 32];
+
+#[derive(Debug)]
+pub enum StoreMsg {
+    ResolveName {
+        name: String,
+        resp: tokio::sync::oneshot::Sender<Option<HashKey>>,
+    },
+    SetName {
+        name: String,
+        key: HashKey,
+    },
+    GetPackage {
+        key: HashKey,
+        resp: tokio::sync::oneshot::Sender<Option<Bytes>>,
+    },
+    AddPackage {
+        value: Bytes,
+        resp: tokio::sync::oneshot::Sender<Result<HashKey>>,
+    },
+    GetAsset {
+        key: HashKey,
+        asset: String,
+        resp: tokio::sync::oneshot::Sender<Option<Bytes>>,
+    },
+}
+
+pub async fn run_store(
+    mut rx: mpsc::UnboundedReceiver<StoreMsg>,
+    mut store: Box<dyn PackageStore + Send>,
+) {
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            StoreMsg::ResolveName { name, resp } => {
+                let key = store.resolve_name(&name);
+                let _ = resp.send(key);
+            }
+            StoreMsg::SetName { name, key } => {
+                store.set_name(&name, key);
+            }
+            StoreMsg::GetPackage { key, resp } => {
+                let pkg = store.get_package(&key);
+                let _ = resp.send(pkg);
+            }
+            StoreMsg::AddPackage { value, resp } => {
+                let key = store.add_package(value);
+                let _ = resp.send(key);
+            }
+            StoreMsg::GetAsset { key, asset, resp } => {
+                let asset_data = store.get_asset(&key, &asset);
+                let _ = resp.send(asset_data);
+            }
+        }
+    }
+}
 
 pub trait PackageStore {
     fn resolve_name(&self, name: &str) -> Option<HashKey>;
