@@ -33,6 +33,11 @@ pub enum StoreMsg {
         asset: String,
         resp: tokio::sync::oneshot::Sender<Option<Bytes>>,
     },
+    GetAssetByName {
+        name: String,
+        asset: String,
+        resp: tokio::sync::oneshot::Sender<Option<Bytes>>,
+    },
 }
 
 pub async fn run_store(
@@ -60,6 +65,11 @@ pub async fn run_store(
                 let asset_data = store.get_asset(&key, &asset);
                 let _ = resp.send(asset_data);
             }
+            StoreMsg::GetAssetByName { name, asset, resp } => {
+                let result = store.resolve_name(&name)
+                    .and_then(|key| store.get_asset(&key, &asset));
+                let _ = resp.send(result);
+            }
         }
     }
 }
@@ -72,13 +82,23 @@ pub trait PackageStore {
     fn get_asset(&self, key: &HashKey, asset: &str) -> Option<Bytes>;
 }
 
-pub struct MemoryPackageStore {
+pub struct InMemoryPackageStore {
     names: HashMap<String, HashKey>,
     packages: HashMap<HashKey, Bytes>,
     cache: HashMap<(HashKey, String), Bytes>,
 }
 
-impl PackageStore for MemoryPackageStore {
+impl InMemoryPackageStore {
+    pub fn new() -> Self {
+        Self {
+            names: HashMap::new(),
+            packages: HashMap::new(),
+            cache: HashMap::new(),
+        }
+    }
+}
+
+impl PackageStore for InMemoryPackageStore {
     fn resolve_name(&self, name: &str) -> Option<HashKey> {
         self.names.get(name).copied()
     }
