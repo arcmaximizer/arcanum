@@ -1,5 +1,5 @@
 use crate::{
-    scheduler::{self, SchedulerMsg},
+    scheduler::{self, Receipt, SchedulerMsg},
     store, types,
 };
 use mlua::{Lua, Value};
@@ -64,8 +64,10 @@ pub async fn run_executor(
 
     let mut threads: HashMap<types::EventId, mlua::Thread> = HashMap::new();
 
+    let mut chunks_len = 0;
+
     while let Some(proposal) = work_rx.recv().await {
-        if let Some(event) = proposal.event {
+        let thread = if let Some(event) = &proposal.event {
             let (tx, rx) = oneshot::channel();
             scheduler_tx
                 .send(SchedulerMsg::GetChunks {
@@ -81,25 +83,61 @@ pub async fn run_executor(
             if chunks.is_empty() {
                 panic!("No chunks for event {}", event);
             }
-
-            // TODO: replay chunks in VM to restore state
-            // For now, just run the new proposal
+            chunks_len = chunks.len();
 
             let thread = threads
                 .entry(event.clone())
                 .or_insert_with(|| vm.create_thread(wrapped.clone()).unwrap());
 
-            // Resume with proposal inputs
-            match thread.resume::<mlua::Value>(mlua::Value::String(
-                vm.create_string(&proposal.inputs.join(",")).unwrap(),
-            )) {
-                Ok(result) => {
-                    println!("Lua returned: {:?}", result);
-                }
-                Err(e) => {
-                    println!("Lua error: {}", e);
+            for item in &chunks {
+                match thread.resume::<mlua::Value>(mlua::Value::String(
+                    vm.create_string(&item.proposal.input).unwrap(),
+                )) {
+                    Ok(result) => {
+                        println!("Lua returned: {:?}", result);
+                    }
+                    Err(e) => {
+                        println!("Lua error: {}", e);
+                        panic!("Unexpected Lua error: {}", e)
+                    }
                 }
             }
-        }
+
+            thread
+        } else {
+            // We're processing a proposal w/o an event yet, so ask for a new one
+            let (tx, rx) = oneshot::channel();
+            scheduler_tx
+                .send(SchedulerMsg::GetNextEventId {
+                    process: process.clone(),
+                    resp: tx,
+                })
+                .unwrap();
+            let event = rx.await.unwrap();
+
+            let thread = threads
+                .entry(event.clone())
+                .or_insert_with(|| vm.create_thread(wrapped.clone()).unwrap());
+
+            thread
+        };
+
+        let receipt = match thread.resume::<mlua::Value>(mlua::Value::String(
+            vm.create_string(&proposal.input).unwrap(),
+        )) {
+            Ok(result) => {
+                println!("Lua returned: {:?}", result);
+                // Start making a chunk receipt
+                Some(Receipt {
+                    proposal,
+                    in_event_seq: chunks_len as u64,
+                    in_log_seq: 0,
+                })
+            }
+            Err(e) => {
+                println!("Lua error: {}", e);
+                None
+            }
+        };
     }
 }

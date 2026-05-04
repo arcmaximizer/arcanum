@@ -24,6 +24,10 @@ pub enum SchedulerMsg {
         event: EventId,
         resp: tokio::sync::oneshot::Sender<Option<Vec<Receipt>>>,
     },
+    GetNextEventId {
+        process: ProcessId,
+        resp: tokio::sync::oneshot::Sender<EventId>,
+    },
     Satisfy {
         proposal: Proposal,
         receipt: Receipt,
@@ -61,6 +65,10 @@ pub async fn run_scheduler(
                 let chunks = scheduler.get_chunks_from_event(&event).cloned();
                 let _ = resp.send(chunks);
             }
+            SchedulerMsg::GetNextEventId { process, resp } => {
+                let event_id = scheduler.get_next_event_id(&process);
+                let _ = resp.send(event_id);
+            }
             SchedulerMsg::Satisfy {
                 proposal,
                 receipt,
@@ -83,7 +91,7 @@ pub struct Receipt {
     /// e.g. ^arc/my-app/my-process/c48
     pub in_log_seq: u64,
     pub syscalls: Vec<Syscall>,
-    pub returns: Vec<String>,
+    pub returns: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -98,7 +106,7 @@ pub enum Syscall {
 pub struct Proposal {
     pub process: ProcessId,
     pub event: Option<EventId>,
-    pub inputs: Vec<String>,
+    pub input: String,
     pub promise: Option<Promise>,
 }
 
@@ -117,6 +125,7 @@ pub struct NextAction {
 pub trait Scheduler {
     fn add_proposal(&mut self, proposal: Proposal) -> u64;
     fn get_next_proposal(&mut self, process: &ProcessId) -> Option<&Proposal>;
+    fn get_next_event_id(&mut self, process: &ProcessId) -> EventId;
     fn satisfy_proposal(&mut self, proposal: &Proposal, receipt: Receipt) -> Result<NextAction>;
     fn get_chunks_from_event(&self, event: &EventId) -> Option<&Vec<Receipt>>;
     fn get_chunk_from_event(&self, event: &EventId, chunk_seq: u64) -> Option<&Receipt>;
@@ -154,6 +163,14 @@ impl Scheduler for InMemoryScheduler {
     }
     fn get_next_proposal(&mut self, process: &ProcessId) -> Option<&Proposal> {
         self.schedule.get(process)?.get(0)
+    }
+    fn get_next_event_id(&mut self, process: &ProcessId) -> EventId {
+        let seq = *self.event_counter.entry(process.clone()).or_insert(0);
+        EventId {
+            app: process.app.clone(),
+            proc: process.proc.clone(),
+            seq,
+        }
     }
     fn satisfy_proposal(&mut self, proposal: &Proposal, receipt: Receipt) -> Result<NextAction> {
         // This should always validate data to ensure that any state transitions always follow some
@@ -275,7 +292,7 @@ impl Scheduler for InMemoryScheduler {
             self.add_proposal(Proposal {
                 event: Some(source_event),
                 process: source_process,
-                inputs: root_returns,
+                input: root_returns,
                 promise: None,
             });
         }
