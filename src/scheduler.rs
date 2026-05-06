@@ -31,6 +31,7 @@ pub enum SchedulerMsg {
     Satisfy {
         proposal: Proposal,
         receipt: Receipt,
+        is_final: bool,
         resp: tokio::sync::oneshot::Sender<Result<NextAction>>,
     },
 }
@@ -72,9 +73,10 @@ pub async fn run_scheduler(
             SchedulerMsg::Satisfy {
                 proposal,
                 receipt,
+                is_final,
                 resp,
             } => {
-                let result = scheduler.satisfy_proposal(&proposal, receipt);
+                let result = scheduler.satisfy_proposal(&proposal, receipt, is_final);
                 let _ = resp.send(result);
             }
         }
@@ -126,7 +128,12 @@ pub trait Scheduler {
     fn add_proposal(&mut self, proposal: Proposal) -> u64;
     fn get_next_proposal(&mut self, process: &ProcessId) -> Option<&Proposal>;
     fn get_next_event_id(&mut self, process: &ProcessId) -> EventId;
-    fn satisfy_proposal(&mut self, proposal: &Proposal, receipt: Receipt) -> Result<NextAction>;
+    fn satisfy_proposal(
+        &mut self,
+        proposal: &Proposal,
+        receipt: Receipt,
+        is_final: bool,
+    ) -> Result<NextAction>;
     fn get_chunks_from_event(&self, event: &EventId) -> Option<&Vec<Receipt>>;
     fn get_chunk_from_event(&self, event: &EventId, chunk_seq: u64) -> Option<&Receipt>;
 }
@@ -172,7 +179,12 @@ impl Scheduler for InMemoryScheduler {
             seq,
         }
     }
-    fn satisfy_proposal(&mut self, proposal: &Proposal, receipt: Receipt) -> Result<NextAction> {
+    fn satisfy_proposal(
+        &mut self,
+        proposal: &Proposal,
+        receipt: Receipt,
+        is_final: bool,
+    ) -> Result<NextAction> {
         // This should always validate data to ensure that any state transitions always follow some
         // invariants. Keep effects at the end in case of reverts and use transactions if possible.
 
@@ -216,15 +228,6 @@ impl Scheduler for InMemoryScheduler {
         if in_event_seq != 0 {
             let prev_receipt = event_chunks.get((in_event_seq - 1) as usize).unwrap();
 
-            if let Some(last_call) = prev_receipt.syscalls.last() {
-                match last_call {
-                    Syscall::Call { proposal: _ } => {}
-                    _ => {
-                        bail!("Event already ended in previous chunk")
-                    }
-                }
-            }
-
             if prev_receipt.proposal.process != receipt.proposal.process {
                 bail!("Chunk process is mismatched with previous chunk")
             }
@@ -233,13 +236,11 @@ impl Scheduler for InMemoryScheduler {
         // Parse the receipt's syscalls
         let mut calls = Vec::new();
         let mut notif_proposals = Vec::new();
-        let mut has_call_at_end = false;
 
-        for (i, syscall) in receipt.syscalls.iter().enumerate() {
+        for syscall in receipt.syscalls.iter() {
             match syscall {
                 Syscall::Call { proposal } => {
                     calls.push(proposal.clone());
-                    has_call_at_end = i + 1 == receipt.syscalls.len();
                 }
                 Syscall::Notify { proposal } => notif_proposals.push(proposal.clone()),
                 _ => {}
@@ -250,19 +251,15 @@ impl Scheduler for InMemoryScheduler {
             bail!("Only one Call syscall is allowed");
         }
 
-        if let Some(_) = calls.last() {
-            if !has_call_at_end {
-                bail!("Call must be at the end of syscalls list");
-            }
-        }
-
         // Get root chunk for promise resolution
         let root_chunk = event_chunks.first().unwrap().clone();
         let promise = root_chunk.proposal.promise.clone();
         let root_returns = root_chunk.returns.clone();
         let promise_target = promise.as_ref().map(|p| p.target.clone());
 
-        schedule.pop_front();
+        if is_final {
+            schedule.pop_front();
+        }
 
         event_chunks.push(receipt.clone());
 
@@ -282,19 +279,21 @@ impl Scheduler for InMemoryScheduler {
 
         for nt in notif_proposals {
             self.schedule
-                .entry(process.clone())
+                .entry(nt.process.clone())
                 .or_insert(VecDeque::new())
                 .push_back(nt);
         }
 
         // Satisfy any existing promises
-        if let Some((source_event, source_process)) = source_chunk_data {
-            self.add_proposal(Proposal {
-                event: Some(source_event),
-                process: source_process,
-                input: root_returns,
-                promise: None,
-            });
+        if is_final {
+            if let Some((source_event, source_process)) = source_chunk_data {
+                self.add_proposal(Proposal {
+                    event: Some(source_event),
+                    process: source_process,
+                    input: root_returns,
+                    promise: None,
+                });
+            }
         }
 
         let action = NextAction {

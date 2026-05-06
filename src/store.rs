@@ -66,7 +66,8 @@ pub async fn run_store(
                 let _ = resp.send(asset_data);
             }
             StoreMsg::GetAssetByName { name, asset, resp } => {
-                let result = store.resolve_name(&name)
+                let result = store
+                    .resolve_name(&name)
                     .and_then(|key| store.get_asset(&key, &asset));
                 let _ = resp.send(result);
             }
