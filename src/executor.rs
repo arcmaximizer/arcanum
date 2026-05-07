@@ -1,6 +1,6 @@
 use crate::{
     scheduler::{self, Proposal, Receipt, SchedulerMsg, Syscall},
-    store, types,
+    types,
 };
 use mlua::Lua;
 use std::collections::HashMap;
@@ -152,26 +152,16 @@ fn parse_syscall(
 }
 
 fn is_non_blocking(syscall: &Syscall) -> bool {
-    matches!(syscall, Syscall::Call { .. } | Syscall::Notify { .. })
+    matches!(syscall, Syscall::Call { .. })
 }
 
 pub async fn run_executor(
     process: types::ProcessId,
     mut work_rx: mpsc::Receiver<Proposal>,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMsg>,
-    store_tx: mpsc::UnboundedSender<store::StoreMsg>,
+    user_code: String,
 ) {
     let lua = Lua::new();
-
-    let (tx, rx) = oneshot::channel();
-    store_tx
-        .send(store::StoreMsg::GetAssetByName {
-            name: process.clone().into(),
-            asset: "main.lua".to_string(),
-            resp: tx,
-        })
-        .unwrap();
-    let user_code = String::from_utf8(rx.await.unwrap().unwrap().to_vec()).unwrap();
 
     let setup: mlua::Function = lua.load(WRAPPER_CODE).eval().unwrap();
     let user_fn: mlua::Function = lua.load(&user_code).eval().unwrap();
@@ -242,7 +232,10 @@ pub async fn run_executor(
                             kv_state.insert(key, new_value);
                             input = mlua::Value::Nil;
                         }
-                        Syscall::Call { .. } | Syscall::Notify { .. } => {
+                        Syscall::Notify { .. } => {
+                            input = mlua::Value::Nil;
+                        }
+                        Syscall::Call { .. } => {
                             break;
                         }
                     }
@@ -301,21 +294,18 @@ mod tests {
     use crate::scheduler::{NextAction, Promise};
     use crate::types::{EventId, ProcessId};
     use anyhow::Result;
-    use bytes::Bytes;
     use tokio::sync::{mpsc, oneshot};
 
     struct ExecutorHarness {
         scheduler_rx: mpsc::UnboundedReceiver<SchedulerMsg>,
-        store_rx: mpsc::UnboundedReceiver<store::StoreMsg>,
         work_tx: mpsc::Sender<Proposal>,
         process: ProcessId,
     }
 
     impl ExecutorHarness {
-        async fn new() -> Self {
+        async fn new(lua_code: String) -> Self {
             let (work_tx, work_rx) = mpsc::channel::<Proposal>(32);
             let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel::<SchedulerMsg>();
-            let (store_tx, store_rx) = mpsc::unbounded_channel::<store::StoreMsg>();
 
             let process = ProcessId {
                 app: "test".to_string(),
@@ -326,29 +316,13 @@ mod tests {
                 process.clone(),
                 work_rx,
                 scheduler_tx,
-                store_tx,
+                lua_code,
             ));
 
             Self {
                 scheduler_rx,
-                store_rx,
                 work_tx,
                 process,
-            }
-        }
-
-        async fn feed_code(&mut self, lua_code: &str) {
-            let code = lua_code.to_owned();
-            match self.store_rx.recv().await.unwrap() {
-                store::StoreMsg::GetAssetByName {
-                    name: _,
-                    asset,
-                    resp,
-                } => {
-                    assert_eq!(asset, "main.lua");
-                    resp.send(Some(Bytes::from(code))).unwrap();
-                }
-                other => panic!("unexpected store message: {:?}", other),
             }
         }
 
@@ -410,8 +384,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_return() {
-        let mut h = ExecutorHarness::new().await;
-        h.feed_code("return function() return 'hello' end").await;
+        let mut h = ExecutorHarness::new("return function() return 'hello' end".to_string()).await;
 
         let _p = h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
@@ -426,8 +399,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_return_nil() {
-        let mut h = ExecutorHarness::new().await;
-        h.feed_code("return function() return nil end").await;
+        let mut h = ExecutorHarness::new("return function() return nil end".to_string()).await;
 
         h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
@@ -439,8 +411,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_return_number() {
-        let mut h = ExecutorHarness::new().await;
-        h.feed_code("return function() return 42 end").await;
+        let mut h = ExecutorHarness::new("return function() return 42 end".to_string()).await;
 
         h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
@@ -454,9 +425,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_get_then_return() {
-        let mut h = ExecutorHarness::new().await;
-        h.feed_code("return function() local v = kv.get('foo'); return v end")
-            .await;
+        let mut h = ExecutorHarness::new(
+            "return function() local v = kv.get('foo'); return v end".to_string(),
+        )
+        .await;
 
         h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
@@ -486,9 +458,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_set_then_get_then_return() {
-        let mut h = ExecutorHarness::new().await;
-        h.feed_code("return function() kv.set('x', '42'); local v = kv.get('x'); return v end")
-            .await;
+        let mut h = ExecutorHarness::new(
+            "return function() kv.set('x', '42'); local v = kv.get('x'); return v end".to_string(),
+        )
+        .await;
 
         h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
@@ -531,9 +504,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_http_get_produces_call() {
-        let mut h = ExecutorHarness::new().await;
-        h.feed_code("return function() http.get('https://example.com') end")
-            .await;
+        let mut h = ExecutorHarness::new(
+            "return function() http.get('https://example.com') end".to_string(),
+        )
+        .await;
 
         h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
@@ -563,9 +537,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_kv_then_http_get() {
-        let mut h = ExecutorHarness::new().await;
-        h.feed_code("return function() kv.set('x', '1'); http.get('https://x.com') end")
-            .await;
+        let mut h = ExecutorHarness::new(
+            "return function() kv.set('x', '1'); http.get('https://x.com') end".to_string(),
+        )
+        .await;
 
         h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
@@ -593,8 +568,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_lua_error_does_not_produce_receipt() {
-        let mut h = ExecutorHarness::new().await;
-        h.feed_code("return function() error('boom') end").await;
+        let mut h = ExecutorHarness::new("return function() error('boom') end".to_string()).await;
 
         h.send_proposal("world").await;
         let _ = h.expect_get_next_event_id().await;
