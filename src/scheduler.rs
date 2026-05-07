@@ -252,7 +252,11 @@ impl Scheduler for InMemoryScheduler {
         }
 
         // Get root chunk for promise resolution
-        let root_chunk = event_chunks.first().unwrap().clone();
+        let root_chunk = if in_event_seq == 0 {
+            receipt.clone()
+        } else {
+            event_chunks.first().unwrap().clone()
+        };
         let promise = root_chunk.proposal.promise.clone();
         let root_returns = root_chunk.returns.clone();
         let promise_target = promise.as_ref().map(|p| p.target.clone());
@@ -308,5 +312,466 @@ impl Scheduler for InMemoryScheduler {
     }
     fn get_chunk_from_event(&self, event: &EventId, chunk_seq: u64) -> Option<&Receipt> {
         self.event_chunks.get(event)?.get(chunk_seq as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proc(id: &str) -> ProcessId {
+        ProcessId {
+            app: "test".to_string(),
+            proc: id.to_string(),
+        }
+    }
+
+    fn event(p: &ProcessId, seq: u64) -> EventId {
+        EventId {
+            app: p.app.clone(),
+            proc: p.proc.clone(),
+            seq,
+        }
+    }
+
+    fn prop(input: &str) -> Proposal {
+        Proposal {
+            process: proc("worker"),
+            event: None,
+            input: input.to_string(),
+            promise: None,
+        }
+    }
+
+    fn receipt(
+        proposal: &Proposal,
+        in_event_seq: u64,
+        in_log_seq: u64,
+        syscalls: Vec<Syscall>,
+        returns: &str,
+    ) -> Receipt {
+        Receipt {
+            proposal: proposal.clone(),
+            in_event_seq,
+            in_log_seq,
+            syscalls,
+            returns: returns.to_string(),
+        }
+    }
+
+    fn kv_read(key: &str, value: &str) -> Syscall {
+        Syscall::KVRead {
+            key: key.to_string(),
+            current_value: value.to_string(),
+        }
+    }
+
+    fn kv_write(key: &str, value: &str) -> Syscall {
+        Syscall::KVWrite {
+            key: key.to_string(),
+            new_value: value.to_string(),
+        }
+    }
+
+    fn call(target: &ProcessId, input: &str, log_seq: u64, event: &EventId) -> Syscall {
+        Syscall::Call {
+            proposal: Proposal {
+                process: target.clone(),
+                event: None,
+                input: input.to_string(),
+                promise: Some(Promise {
+                    id: log_seq,
+                    target: event.clone(),
+                }),
+            },
+        }
+    }
+
+    fn notify(target: &ProcessId, input: &str) -> Syscall {
+        Syscall::Notify {
+            proposal: Proposal {
+                process: target.clone(),
+                event: None,
+                input: input.to_string(),
+                promise: None,
+            },
+        }
+    }
+
+    // --- add_proposal ---
+
+    #[test]
+    fn test_add_proposal() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("hello");
+        let idx = s.add_proposal(p.clone());
+        assert_eq!(idx, 0);
+        assert_eq!(s.get_next_proposal(&proc("worker")), Some(&p));
+    }
+
+    #[test]
+    fn test_add_proposal_sequential_indices() {
+        let mut s = InMemoryScheduler::new();
+        assert_eq!(s.add_proposal(prop("a")), 0);
+        assert_eq!(s.add_proposal(prop("b")), 1);
+        assert_eq!(s.add_proposal(prop("c")), 2);
+    }
+
+    #[test]
+    fn test_add_proposal_multiple_processes() {
+        let mut s = InMemoryScheduler::new();
+        let mut p_a = prop("a");
+        p_a.process = proc("a");
+        let mut p_b = prop("b");
+        p_b.process = proc("b");
+
+        s.add_proposal(p_a.clone());
+        s.add_proposal(p_b.clone());
+
+        assert_eq!(s.get_next_proposal(&proc("a")), Some(&p_a));
+        assert_eq!(s.get_next_proposal(&proc("b")), Some(&p_b));
+    }
+
+    // --- get_next_proposal ---
+
+    #[test]
+    fn test_get_next_proposal_empty() {
+        let mut s = InMemoryScheduler::new();
+        assert_eq!(s.get_next_proposal(&proc("nope")), None);
+    }
+
+    #[test]
+    fn test_get_next_proposal_after_pop() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("first");
+        s.add_proposal(p.clone());
+        s.add_proposal(prop("second"));
+
+        let rec = receipt(&p, 0, 0, vec![], "ok");
+        s.satisfy_proposal(&p, rec, true).unwrap();
+
+        assert_eq!(
+            s.get_next_proposal(&proc("worker")).unwrap().input,
+            "second"
+        );
+    }
+
+    // --- get_next_event_id ---
+
+    #[test]
+    fn test_get_next_event_id_defaults_to_zero() {
+        let mut s = InMemoryScheduler::new();
+        let e = s.get_next_event_id(&proc("worker"));
+        assert_eq!(e.seq, 0);
+        assert_eq!(e.app, "test");
+        assert_eq!(e.proc, "worker");
+    }
+
+    #[test]
+    fn test_get_next_event_id_is_idempotent() {
+        let mut s = InMemoryScheduler::new();
+        let e1 = s.get_next_event_id(&proc("worker"));
+        let e2 = s.get_next_event_id(&proc("worker"));
+        assert_eq!(e1, e2);
+        assert_eq!(e1.seq, 0);
+    }
+
+    #[test]
+    fn test_get_next_event_id_separate_processes() {
+        let mut s = InMemoryScheduler::new();
+        // Manually seed a higher counter for "worker"
+        s.event_counter.insert(proc("worker"), 5);
+        let e = s.get_next_event_id(&proc("worker"));
+        assert_eq!(e.seq, 5);
+        // "other" should still default to 0
+        let e2 = s.get_next_event_id(&proc("other"));
+        assert_eq!(e2.seq, 0);
+    }
+
+    // --- satisfy_proposal: basic ---
+
+    #[test]
+    fn test_satisfy_proposal_basic() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("hello");
+        s.add_proposal(p.clone());
+
+        let rec = receipt(&p, 0, 0, vec![], "world");
+        let action = s.satisfy_proposal(&p, rec, true).unwrap();
+
+        assert_eq!(action.event, event(&proc("worker"), 0));
+        assert_eq!(action.proposal, None);
+        assert!(s.schedule.get(&proc("worker")).unwrap().is_empty());
+        assert_eq!(s.process_chunks.get(&proc("worker")).unwrap().len(), 1);
+        assert_eq!(
+            s.event_chunks
+                .get(&event(&proc("worker"), 0))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_satisfy_proposal_wrong_process_seq() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("hello");
+        s.add_proposal(p.clone());
+
+        let rec = receipt(&p, 0, 1, vec![], "ok");
+        let err = s.satisfy_proposal(&p, rec, true).unwrap_err();
+        assert!(err.to_string().contains("misaligned with chunk history"));
+    }
+
+    #[test]
+    fn test_satisfy_proposal_wrong_event_seq() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("hello");
+        s.add_proposal(p.clone());
+
+        let rec = receipt(&p, 1, 0, vec![], "ok");
+        let err = s.satisfy_proposal(&p, rec, true).unwrap_err();
+        assert!(err.to_string().contains("misaligned with per-event log"));
+    }
+
+    #[test]
+    fn test_satisfy_proposal_not_first_in_schedule() {
+        let mut s = InMemoryScheduler::new();
+        s.add_proposal(prop("first"));
+        let p2 = prop("second");
+        s.add_proposal(p2.clone());
+
+        let rec = receipt(&p2, 0, 0, vec![], "ok");
+        let err = s.satisfy_proposal(&p2, rec, true).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Proposal does not match first scheduled proposal")
+        );
+    }
+
+    #[test]
+    fn test_satisfy_proposal_empty_schedule() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("orphan");
+        let rec = receipt(&p, 0, 0, vec![], "ok");
+        let err = s.satisfy_proposal(&p, rec, true).unwrap_err();
+        assert!(err.to_string().contains("No proposals exist in schedule"));
+    }
+
+    #[test]
+    fn test_satisfy_proposal_mismatched_process() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("hello");
+        s.add_proposal(p.clone());
+
+        // Add two receipts with the same proposal
+        let rec1 = receipt(&p, 0, 0, vec![], "");
+        s.satisfy_proposal(&p, rec1, false).unwrap();
+
+        // Try a second receipt for the same event but with a different process in the receipt
+        let mut wrong_rec = receipt(&p, 1, 1, vec![], "");
+        wrong_rec.proposal.process = proc("other");
+        let err = s.satisfy_proposal(&p, wrong_rec, true).unwrap_err();
+        assert!(err.to_string().contains("process is mismatched"));
+    }
+
+    // --- satisfy_proposal: intermediate (is_final = false) ---
+
+    #[test]
+    fn test_intermediate_receipt_does_not_pop() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("hello");
+        s.add_proposal(p.clone());
+
+        let rec = receipt(&p, 0, 0, vec![kv_read("k", "v")], "");
+        s.satisfy_proposal(&p, rec, false).unwrap();
+
+        // Proposal should still be in schedule
+        assert_eq!(s.get_next_proposal(&proc("worker")), Some(&p));
+        assert_eq!(s.process_chunks.get(&proc("worker")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_multiple_intermediate_then_final() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("hello");
+        s.add_proposal(p.clone());
+
+        // Two intermediate KV receipts
+        s.satisfy_proposal(&p, receipt(&p, 0, 0, vec![kv_read("a", "")], ""), false)
+            .unwrap();
+        s.satisfy_proposal(&p, receipt(&p, 1, 1, vec![kv_write("a", "42")], ""), false)
+            .unwrap();
+
+        // Final receipt
+        s.satisfy_proposal(&p, receipt(&p, 2, 2, vec![], "done"), true)
+            .unwrap();
+
+        // Schedule should be empty now
+        assert!(s.schedule.get(&proc("worker")).unwrap().is_empty());
+        assert_eq!(s.process_chunks.get(&proc("worker")).unwrap().len(), 3);
+
+        let ev = event(&proc("worker"), 0);
+        let chunks = s.get_chunks_from_event(&ev).unwrap();
+        assert_eq!(chunks.len(), 3);
+        assert_eq!(chunks[2].returns, "done");
+    }
+
+    #[test]
+    fn test_call_after_kv_receipts() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("hello");
+        s.add_proposal(p.clone());
+
+        let ev = event(&proc("worker"), 0);
+
+        // KV read receipt (intermediate)
+        s.satisfy_proposal(&p, receipt(&p, 0, 0, vec![kv_read("k", "v")], ""), false)
+            .unwrap();
+
+        // KV write receipt (intermediate)
+        s.satisfy_proposal(&p, receipt(&p, 1, 1, vec![kv_write("k", "42")], ""), false)
+            .unwrap();
+
+        // Call receipt (final)
+        let target = proc("callee");
+        let call_sys = call(&target, "ping", 2, &ev);
+        let action = s
+            .satisfy_proposal(&p, receipt(&p, 2, 2, vec![call_sys.clone()], ""), true)
+            .unwrap();
+
+        assert_eq!(action.event, ev);
+        // The call's proposal should be the NextAction proposal
+        if let Syscall::Call { proposal } = &call_sys {
+            assert_eq!(action.proposal.as_ref(), Some(proposal));
+        } else {
+            panic!("expected Call");
+        }
+    }
+
+    // --- Notify routing ---
+
+    #[test]
+    fn test_notify_routes_to_target_process() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("hello");
+        s.add_proposal(p.clone());
+
+        let target = proc("other");
+        let rec = receipt(&p, 0, 0, vec![notify(&target, "fire!")], "");
+        s.satisfy_proposal(&p, rec, true).unwrap();
+
+        assert_eq!(s.get_next_proposal(&target).unwrap().input, "fire!");
+    }
+
+    // --- Promise resolution ---
+
+    #[test]
+    fn test_promise_resolution() {
+        let mut s = InMemoryScheduler::new();
+
+        let proc_a = proc("a");
+        let proc_b = proc("b");
+        let ev_a = event(&proc_a, 0);
+
+        let p_a = Proposal {
+            process: proc_a.clone(),
+            event: None,
+            input: "call_b".to_string(),
+            promise: None,
+        };
+        s.add_proposal(p_a.clone());
+
+        // First receipt for A: contains a Call to B with a promise
+        let call_sys = call(&proc_b, "hey", 0, &ev_a);
+        let action = s
+            .satisfy_proposal(&p_a, receipt(&p_a, 0, 0, vec![call_sys.clone()], ""), true)
+            .unwrap();
+
+        // Add the call proposal to B's schedule (simulating executor routing)
+        let p_b = action.proposal.unwrap();
+        s.add_proposal(p_b.clone());
+
+        // B processes it, returning "reply"
+        let ev_b = event(&proc_b, 0);
+        let rec_b = receipt(&p_b, 0, 0, vec![], "reply");
+        let action = s.satisfy_proposal(&p_b, rec_b, true).unwrap();
+
+        assert_eq!(action.event, ev_b);
+
+        // Promise resolution: A should have a new proposal with "reply"
+        let a_next = s.get_next_proposal(&proc_a).unwrap();
+        assert_eq!(a_next.input, "reply");
+        assert_eq!(a_next.event, Some(ev_a.clone()));
+        assert!(a_next.promise.is_none());
+    }
+
+    #[test]
+    fn test_promise_resolution_only_on_final() {
+        let mut s = InMemoryScheduler::new();
+
+        let proc_a = proc("a");
+        let proc_b = proc("b");
+        let ev_a = event(&proc_a, 0);
+
+        let p_a = prop("call_b");
+        s.add_proposal(p_a.clone());
+
+        let call_sys = call(&proc_b, "hey", 0, &ev_a);
+        let action = s
+            .satisfy_proposal(&p_a, receipt(&p_a, 0, 0, vec![call_sys.clone()], ""), true)
+            .unwrap();
+
+        // Add the call proposal to B's schedule
+        let p_b = action.proposal.unwrap();
+        s.add_proposal(p_b.clone());
+
+        // B's intermediate receipt (is_final=false)
+        s.satisfy_proposal(&p_b, receipt(&p_b, 0, 0, vec![], "reply"), false)
+            .unwrap();
+
+        // Promise should NOT be resolved yet (is_final=false)
+        assert!(s.get_next_proposal(&proc_a).is_none());
+    }
+
+    // --- get_chunks_from_event ---
+
+    #[test]
+    fn test_get_chunks_from_event_empty() {
+        let s = InMemoryScheduler::new();
+        assert_eq!(s.get_chunks_from_event(&event(&proc("worker"), 0)), None);
+    }
+
+    #[test]
+    fn test_get_chunks_from_event_after_satisfy() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("hello");
+        s.add_proposal(p.clone());
+
+        let rec = receipt(&p, 0, 0, vec![], "ok");
+        s.satisfy_proposal(&p, rec, true).unwrap();
+
+        let chunks = s.get_chunks_from_event(&event(&proc("worker"), 0)).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].returns, "ok");
+    }
+
+    // --- get_chunk_from_event ---
+
+    #[test]
+    fn test_get_chunk_from_event_by_seq() {
+        let mut s = InMemoryScheduler::new();
+        let p = prop("hello");
+        s.add_proposal(p.clone());
+
+        s.satisfy_proposal(&p, receipt(&p, 0, 0, vec![], "first"), false)
+            .unwrap();
+        s.satisfy_proposal(&p, receipt(&p, 1, 1, vec![], "second"), true)
+            .unwrap();
+
+        let ev = event(&proc("worker"), 0);
+        assert_eq!(s.get_chunk_from_event(&ev, 0).unwrap().returns, "first");
+        assert_eq!(s.get_chunk_from_event(&ev, 1).unwrap().returns, "second");
+        assert_eq!(s.get_chunk_from_event(&ev, 2), None);
     }
 }
