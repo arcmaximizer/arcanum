@@ -1,10 +1,15 @@
 use crate::{
     scheduler::{self, Proposal, Receipt, SchedulerMsg, Syscall},
+    state::StateMsg,
     types,
 };
 use mlua::Lua;
 use std::collections::HashMap;
 use tokio::sync::{mpsc, oneshot};
+
+macro_rules! debug {
+    ($($arg:tt)*) => { eprintln!("[EXECUTOR DEBUG] {}", format!($($arg)*)) };
+}
 
 const WRAPPER_CODE: &str = r#"
 local _yield = coroutine.yield
@@ -26,8 +31,18 @@ function kv.set(key, value)
     return syscall("kv_set", key, value)
 end
 
+local function call(target, input)
+    return syscall("call", target, input)
+end
+
+local function notify(target, input)
+    return syscall("notify", target, input)
+end
+
 rawset(_G, "http", http)
 rawset(_G, "kv", kv)
+rawset(_G, "call", call)
+rawset(_G, "notify", notify)
 rawset(_G, "coroutine", nil)
 rawset(_G, "syscall", nil)
 
@@ -157,8 +172,9 @@ fn is_non_blocking(syscall: &Syscall) -> bool {
 
 pub async fn run_executor(
     process: types::ProcessId,
-    mut work_rx: mpsc::Receiver<Proposal>,
+    mut work_rx: mpsc::UnboundedReceiver<Proposal>,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMsg>,
+    state_tx: mpsc::UnboundedSender<StateMsg>,
     user_code: String,
 ) {
     let lua = Lua::new();
@@ -168,14 +184,17 @@ pub async fn run_executor(
     let wrapped: mlua::Function = setup.call(user_fn).unwrap();
 
     let mut threads: HashMap<types::EventId, mlua::Thread> = HashMap::new();
-    let mut kv_state: HashMap<String, String> = HashMap::new();
-    let mut log_seq: u64 = 0;
+
     let mut event_seqs: HashMap<types::EventId, u64> = HashMap::new();
 
+    let mut kv_state: HashMap<String, String> = HashMap::new();
+
     while let Some(proposal) = work_rx.recv().await {
+        debug!("Received proposal: process={}/{} input={}", proposal.process.app, proposal.process.proc, proposal.input);
         let event = if let Some(ref e) = proposal.event {
             e.clone()
         } else {
+            debug!("No event ID provided, requesting from scheduler");
             let (tx, rx) = oneshot::channel();
             scheduler_tx
                 .send(SchedulerMsg::GetNextEventId {
@@ -183,7 +202,9 @@ pub async fn run_executor(
                     resp: tx,
                 })
                 .unwrap();
-            rx.await.unwrap()
+            let e = rx.await.unwrap();
+            debug!("Got event ID: {}/{} seq={}", e.app, e.proc, e.seq);
+            e
         };
 
         let thread = threads
@@ -194,11 +215,25 @@ pub async fn run_executor(
 
         loop {
             let in_event_seq = *event_seqs.entry(event.clone()).or_insert(0);
+            debug!("Loop start: event={}/{} seq={} in_event_seq={}", event.app, event.proc, event.seq, in_event_seq);
 
+            let (tx_log, rx_log) = oneshot::channel();
+            scheduler_tx
+                .send(SchedulerMsg::GetLogSeq {
+                    process: process.clone(),
+                    resp: tx_log,
+                })
+                .unwrap();
+            let log_seq = rx_log.await.unwrap();
+            debug!("Got log_seq={}", log_seq);
+
+            debug!("Resuming Lua thread with input={:?}", input);
             match thread.resume::<mlua::Value>(input.clone()) {
                 Ok(mlua::Value::Table(table)) => {
+                    debug!("Got syscall from Lua");
                     let syscall =
                         parse_syscall(&mlua::Value::Table(table), &event, log_seq, &kv_state);
+                    debug!("Parsed syscall: {:?}", syscall);
 
                     let receipt = Receipt {
                         proposal: proposal.clone(),
@@ -209,6 +244,7 @@ pub async fn run_executor(
                     };
 
                     let is_final_syscall = is_non_blocking(&syscall);
+                    debug!("Sending satisfy: is_final={}", is_final_syscall);
 
                     let (tx, rx) = oneshot::channel();
                     scheduler_tx
@@ -219,29 +255,48 @@ pub async fn run_executor(
                             resp: tx,
                         })
                         .unwrap();
-                    rx.await.unwrap().unwrap();
+                    let next_action = rx.await.unwrap().unwrap();
+                    debug!("Got next action: event={}/{} proposal={:?}", next_action.event.app, next_action.event.proc, next_action.proposal);
 
                     event_seqs.insert(event.clone(), in_event_seq + 1);
-                    log_seq += 1;
 
                     match syscall {
-                        Syscall::KVRead { current_value, .. } => {
-                            input = mlua::Value::String(lua.create_string(&current_value).unwrap());
+                        Syscall::KVRead { key, .. } => {
+                            debug!("KVRead: key={}", key);
+                            let value = kv_state.get(&key).cloned().unwrap_or_default();
+                            debug!("KVRead: value={}", value);
+                            input = mlua::Value::String(lua.create_string(&value).unwrap());
                         }
                         Syscall::KVWrite { key, new_value } => {
+                            debug!("KVWrite: key={} value={}", key, new_value);
+                            let (tx, rx) = oneshot::channel();
+                            state_tx
+                                .send(StateMsg::Set {
+                                    process: process.clone(),
+                                    key: key.clone(),
+                                    value: new_value.clone(),
+                                    resp: tx,
+                                })
+                                .unwrap();
+                            rx.await.unwrap();
                             kv_state.insert(key, new_value);
+                            debug!("KVWrite: state updated");
                             input = mlua::Value::Nil;
                         }
-                        Syscall::Notify { .. } => {
+                        Syscall::Notify { proposal, .. } => {
+                            debug!("Notify: target={}/{} input={}", proposal.process.app, proposal.process.proc, proposal.input);
                             input = mlua::Value::Nil;
                         }
-                        Syscall::Call { .. } => {
+                        Syscall::Call { proposal, .. } => {
+                            debug!("Call: target={}/{} input={}", proposal.process.app, proposal.process.proc, proposal.input);
                             break;
                         }
                     }
                 }
                 Ok(return_value) => {
+                    debug!("Lua returned: {:?}", return_value);
                     let returns = extract_return(&return_value, &lua);
+                    debug!("Extracted return: '{}'", returns);
                     let in_event_seq = *event_seqs.entry(event.clone()).or_insert(0);
 
                     let receipt = Receipt {
@@ -261,13 +316,15 @@ pub async fn run_executor(
                             resp: tx,
                         })
                         .unwrap();
+                    debug!("Sent final satisfy, awaiting response");
                     rx.await.unwrap().unwrap();
+                    debug!("Final satisfy complete, breaking loop");
 
-                    log_seq += 1;
                     break;
                 }
                 Err(e) => {
                     eprintln!("Lua error: {}", e);
+                    debug!("Lua error occurred, breaking loop");
                     break;
                 }
             }
@@ -298,14 +355,17 @@ mod tests {
 
     struct ExecutorHarness {
         scheduler_rx: mpsc::UnboundedReceiver<SchedulerMsg>,
-        work_tx: mpsc::Sender<Proposal>,
+        state_rx: mpsc::UnboundedReceiver<StateMsg>,
+        work_tx: mpsc::UnboundedSender<Proposal>,
         process: ProcessId,
+        log_seq: u64,
     }
 
     impl ExecutorHarness {
         async fn new(lua_code: String) -> Self {
-            let (work_tx, work_rx) = mpsc::channel::<Proposal>(32);
+            let (work_tx, work_rx) = mpsc::unbounded_channel::<Proposal>();
             let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel::<SchedulerMsg>();
+            let (state_tx, state_rx) = mpsc::unbounded_channel::<StateMsg>();
 
             let process = ProcessId {
                 app: "test".to_string(),
@@ -316,13 +376,16 @@ mod tests {
                 process.clone(),
                 work_rx,
                 scheduler_tx,
+                state_tx,
                 lua_code,
             ));
 
             Self {
                 scheduler_rx,
+                state_rx,
                 work_tx,
                 process,
+                log_seq: 0,
             }
         }
 
@@ -333,7 +396,7 @@ mod tests {
                 input: input.to_string(),
                 promise: None,
             };
-            self.work_tx.send(proposal.clone()).await.unwrap();
+            self.work_tx.send(proposal.clone()).unwrap();
             proposal
         }
 
@@ -371,12 +434,94 @@ mod tests {
             }
         }
 
-        fn respond_satisfy(resp: oneshot::Sender<Result<NextAction>>, event: EventId) {
+        fn respond_satisfy(&mut self, resp: oneshot::Sender<Result<NextAction>>, event: EventId) {
             resp.send(Ok(NextAction {
                 event,
                 proposal: None,
             }))
             .unwrap();
+            self.log_seq += 1;
+        }
+
+        async fn expect_get_log_seq(&mut self) -> u64 {
+            match self.scheduler_rx.recv().await.unwrap() {
+                SchedulerMsg::GetLogSeq { process, resp } => {
+                    assert_eq!(process, self.process);
+                    resp.send(0).unwrap();
+                    0
+                }
+                other => panic!("expected GetLogSeq, got {:?}", other),
+            }
+        }
+
+        async fn expect_state_get(&mut self) -> (String, oneshot::Sender<Option<String>>) {
+            match self.state_rx.recv().await.unwrap() {
+                StateMsg::Get {
+                    process: _,
+                    key,
+                    resp,
+                } => (key, resp),
+                other => panic!("expected StateMsg::Get, got {:?}", other),
+            }
+        }
+
+        async fn expect_state_set(&mut self) -> (String, String, oneshot::Sender<()>) {
+            match self.state_rx.recv().await.unwrap() {
+                StateMsg::Set {
+                    process: _,
+                    key,
+                    value,
+                    resp,
+                } => (key, value, resp),
+                other => panic!("expected StateMsg::Set, got {:?}", other),
+            }
+        }
+
+        async fn drain_to_get_log_seq(&mut self) {
+            let mut got_log_seq = false;
+            loop {
+                tokio::select! {
+                    msg = self.scheduler_rx.recv() => {
+                        match msg {
+                            Some(SchedulerMsg::GetLogSeq { process, resp }) => {
+                                assert_eq!(process, self.process);
+                                let seq = self.log_seq;
+                                resp.send(seq).unwrap();
+                                got_log_seq = true;
+                            }
+                            Some(SchedulerMsg::GetNextEventId { process, resp }) => {
+                                assert_eq!(process, self.process);
+                                resp.send(EventId {
+                                    app: "test".to_string(),
+                                    proc: "p".to_string(),
+                                    seq: 0,
+                                }).unwrap();
+                            }
+                            Some(SchedulerMsg::Satisfy { resp, .. }) => {
+                                resp.send(Ok(NextAction {
+                                    event: EventId { app: "test".to_string(), proc: "p".to_string(), seq: 0 },
+                                    proposal: None,
+                                })).unwrap();
+                            }
+                            _ => {}
+                        }
+                    }
+                    msg = self.state_rx.recv() => {
+                        match msg {
+                            Some(StateMsg::Set { resp, .. }) => {
+                                resp.send(()).unwrap();
+                            }
+                            Some(StateMsg::Get { resp, .. }) => {
+                                resp.send(None).unwrap();
+                            }
+                            None => break,
+                        }
+                    }
+                }
+                if got_log_seq {
+                    break;
+                }
+            }
         }
     }
 
@@ -388,13 +533,14 @@ mod tests {
 
         let _p = h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
+        h.drain_to_get_log_seq().await;
 
         let (receipt, resp) = h.expect_satisfy(true).await;
         assert_eq!(receipt.syscalls, vec![]);
         assert_eq!(receipt.returns, "hello");
         assert_eq!(receipt.in_event_seq, 0);
         assert_eq!(receipt.in_log_seq, 0);
-        ExecutorHarness::respond_satisfy(resp, event);
+        h.respond_satisfy(resp, event);
     }
 
     #[tokio::test]
@@ -403,10 +549,11 @@ mod tests {
 
         h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
+        h.drain_to_get_log_seq().await;
 
         let (receipt, resp) = h.expect_satisfy(true).await;
         assert_eq!(receipt.returns, "");
-        ExecutorHarness::respond_satisfy(resp, event);
+        h.respond_satisfy(resp, event);
     }
 
     #[tokio::test]
@@ -415,10 +562,11 @@ mod tests {
 
         h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
+        h.drain_to_get_log_seq().await;
 
         let (receipt, resp) = h.expect_satisfy(true).await;
         assert_eq!(receipt.returns, "42");
-        ExecutorHarness::respond_satisfy(resp, event);
+        h.respond_satisfy(resp, event);
     }
 
     // --- KV syscalls ---
@@ -432,6 +580,7 @@ mod tests {
 
         h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
+        h.drain_to_get_log_seq().await;
 
         // First: KVRead receipt (intermediate)
         let (rec1, resp1) = h.expect_satisfy(false).await;
@@ -445,7 +594,9 @@ mod tests {
                 current_value: String::new(),
             }]
         );
-        ExecutorHarness::respond_satisfy(resp1, event.clone());
+        h.respond_satisfy(resp1, event.clone());
+
+        h.drain_to_get_log_seq().await;
 
         // Second: final receipt with empty value
         let (rec2, resp2) = h.expect_satisfy(true).await;
@@ -453,7 +604,7 @@ mod tests {
         assert_eq!(rec2.in_log_seq, 1);
         assert_eq!(rec2.returns, "");
         assert_eq!(rec2.syscalls, vec![]);
-        ExecutorHarness::respond_satisfy(resp2, event);
+        h.respond_satisfy(resp2, event);
     }
 
     #[tokio::test]
@@ -465,6 +616,7 @@ mod tests {
 
         h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
+        h.drain_to_get_log_seq().await;
 
         // KVWrite (intermediate)
         let (rec1, resp1) = h.expect_satisfy(false).await;
@@ -476,7 +628,9 @@ mod tests {
                 new_value: "42".to_string(),
             }]
         );
-        ExecutorHarness::respond_satisfy(resp1, event.clone());
+        h.respond_satisfy(resp1, event.clone());
+
+        h.drain_to_get_log_seq().await;
 
         // KVRead with value "42" (intermediate)
         let (rec2, resp2) = h.expect_satisfy(false).await;
@@ -489,7 +643,9 @@ mod tests {
                 current_value: "42".to_string(),
             }]
         );
-        ExecutorHarness::respond_satisfy(resp2, event.clone());
+        h.respond_satisfy(resp2, event.clone());
+
+        h.drain_to_get_log_seq().await;
 
         // Final with "42"
         let (rec3, resp3) = h.expect_satisfy(true).await;
@@ -497,7 +653,7 @@ mod tests {
         assert_eq!(rec3.in_log_seq, 2);
         assert_eq!(rec3.returns, "42");
         assert_eq!(rec3.syscalls, vec![]);
-        ExecutorHarness::respond_satisfy(resp3, event);
+        h.respond_satisfy(resp3, event);
     }
 
     // --- Non-blocking syscall ---
@@ -511,6 +667,7 @@ mod tests {
 
         h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
+        h.drain_to_get_log_seq().await;
 
         let (receipt, resp) = h.expect_satisfy(true).await;
         assert_eq!(receipt.in_event_seq, 0);
@@ -532,7 +689,7 @@ mod tests {
             }
             other => panic!("expected Call, got {:?}", other),
         }
-        ExecutorHarness::respond_satisfy(resp, event);
+        h.respond_satisfy(resp, event);
     }
 
     #[tokio::test]
@@ -544,6 +701,7 @@ mod tests {
 
         h.send_proposal("world").await;
         let event = h.expect_get_next_event_id().await;
+        h.drain_to_get_log_seq().await;
 
         // KVWrite (intermediate)
         let (rec1, resp1) = h.expect_satisfy(false).await;
@@ -554,14 +712,16 @@ mod tests {
                 new_value: "1".to_string(),
             }]
         );
-        ExecutorHarness::respond_satisfy(resp1, event.clone());
+        h.respond_satisfy(resp1, event.clone());
+
+        h.drain_to_get_log_seq().await;
 
         // Call (final)
         let (rec2, resp2) = h.expect_satisfy(true).await;
         assert!(
             matches!(&rec2.syscalls[0], Syscall::Call { proposal } if proposal.process.app == "sys")
         );
-        ExecutorHarness::respond_satisfy(resp2, event);
+        h.respond_satisfy(resp2, event);
     }
 
     // --- Error handling ---
@@ -571,6 +731,7 @@ mod tests {
         let mut h = ExecutorHarness::new("return function() error('boom') end".to_string()).await;
 
         h.send_proposal("world").await;
+        h.drain_to_get_log_seq().await;
         let _ = h.expect_get_next_event_id().await;
 
         // Executor should hit Err and break without sending Satisfy.

@@ -28,6 +28,10 @@ pub enum SchedulerMsg {
         process: ProcessId,
         resp: tokio::sync::oneshot::Sender<EventId>,
     },
+    GetLogSeq {
+        process: ProcessId,
+        resp: tokio::sync::oneshot::Sender<u64>,
+    },
     Satisfy {
         proposal: Proposal,
         receipt: Receipt,
@@ -48,6 +52,12 @@ pub async fn run_scheduler(
                 let process = proposal.process.clone();
                 let id = scheduler.add_proposal(proposal.clone());
                 let _ = resp.send(id);
+
+                // How do we fix: if we add a proposal in a different way (eg from
+                // within our scheduler) it doesn't send to the executors
+                // TODO come up with a good non-hacky solution for this
+                // maybe might have to more natively integrate the actor into the
+                // scheduler...
                 if let Some(tx) = executor_senders.get(&process) {
                     let _ = tx.send(proposal);
                 }
@@ -69,6 +79,10 @@ pub async fn run_scheduler(
             SchedulerMsg::GetNextEventId { process, resp } => {
                 let event_id = scheduler.get_next_event_id(&process);
                 let _ = resp.send(event_id);
+            }
+            SchedulerMsg::GetLogSeq { process, resp } => {
+                let log_seq = scheduler.get_log_seq(&process);
+                let _ = resp.send(log_seq);
             }
             SchedulerMsg::Satisfy {
                 proposal,
@@ -128,6 +142,7 @@ pub trait Scheduler {
     fn add_proposal(&mut self, proposal: Proposal) -> u64;
     fn get_next_proposal(&mut self, process: &ProcessId) -> Option<&Proposal>;
     fn get_next_event_id(&mut self, process: &ProcessId) -> EventId;
+    fn get_log_seq(&self, process: &ProcessId) -> u64;
     fn satisfy_proposal(
         &mut self,
         proposal: &Proposal,
@@ -178,6 +193,12 @@ impl Scheduler for InMemoryScheduler {
             proc: process.proc.clone(),
             seq,
         }
+    }
+    fn get_log_seq(&self, process: &ProcessId) -> u64 {
+        self.process_chunks
+            .get(process)
+            .map(|c| c.len() as u64)
+            .unwrap_or(0)
     }
     fn satisfy_proposal(
         &mut self,
