@@ -2,6 +2,7 @@ use crate::types::{EventId, ProcessId};
 use anyhow::{Result, anyhow, bail};
 use std::collections::{HashMap, VecDeque};
 use tokio::sync::mpsc;
+use tracing;
 
 #[derive(Debug)]
 pub enum SchedulerMsg {
@@ -53,11 +54,6 @@ pub async fn run_scheduler(
                 let id = scheduler.add_proposal(proposal.clone());
                 let _ = resp.send(id);
 
-                // How do we fix: if we add a proposal in a different way (eg from
-                // within our scheduler) it doesn't send to the executors
-                // TODO come up with a good non-hacky solution for this
-                // maybe might have to more natively integrate the actor into the
-                // scheduler...
                 if let Some(tx) = executor_senders.get(&process) {
                     let _ = tx.send(proposal);
                 }
@@ -91,7 +87,20 @@ pub async fn run_scheduler(
                 resp,
             } => {
                 let result = scheduler.satisfy_proposal(&proposal, receipt, is_final);
-                let _ = resp.send(result);
+                if let Ok((_action, new_proposals)) = &result {
+                    if !new_proposals.is_empty() {
+                        tracing::debug!("Adding {} new proposals from satisfy:", new_proposals.len());
+                        for p in new_proposals {
+                            tracing::debug!("  -> process={} input={}", p.process.proc, p.input);
+                        }
+                    }
+                    for p in new_proposals {
+                        if let Some(tx) = executor_senders.get(&p.process) {
+                            let _ = tx.send(p.clone());
+                        }
+                    }
+                }
+                let _ = resp.send(result.map(|(action, _)| action));
             }
         }
     }
@@ -148,7 +157,7 @@ pub trait Scheduler {
         proposal: &Proposal,
         receipt: Receipt,
         is_final: bool,
-    ) -> Result<NextAction>;
+    ) -> Result<(NextAction, Vec<Proposal>)>;
     fn get_chunks_from_event(&self, event: &EventId) -> Option<&Vec<Receipt>>;
     fn get_chunk_from_event(&self, event: &EventId, chunk_seq: u64) -> Option<&Receipt>;
 }
@@ -205,7 +214,7 @@ impl Scheduler for InMemoryScheduler {
         proposal: &Proposal,
         receipt: Receipt,
         is_final: bool,
-    ) -> Result<NextAction> {
+    ) -> Result<(NextAction, Vec<Proposal>)> {
         // This should always validate data to ensure that any state transitions always follow some
         // invariants. Keep effects at the end in case of reverts and use transactions if possible.
 
@@ -214,6 +223,9 @@ impl Scheduler for InMemoryScheduler {
         let in_log_seq = receipt.in_log_seq;
         let in_event_seq = receipt.in_event_seq;
         let event_id = *self.event_counter.entry(process.clone()).or_insert(0);
+        if proposal.event.is_none() {
+            self.event_counter.insert(process.clone(), event_id + 1);
+        }
         let event = proposal.event.clone().unwrap_or(EventId {
             app: process.app.clone(),
             proc: process.proc.clone(),
@@ -302,22 +314,27 @@ impl Scheduler for InMemoryScheduler {
             None
         };
 
+        let mut new_proposals = Vec::new();
+
         for nt in notif_proposals {
             self.schedule
                 .entry(nt.process.clone())
                 .or_insert(VecDeque::new())
-                .push_back(nt);
+                .push_back(nt.clone());
+            new_proposals.push(nt);
         }
 
         // Satisfy any existing promises
         if is_final {
             if let Some((source_event, source_process)) = source_chunk_data {
-                self.add_proposal(Proposal {
+                let promise_proposal = Proposal {
                     event: Some(source_event),
                     process: source_process,
                     input: root_returns,
                     promise: None,
-                });
+                };
+                self.add_proposal(promise_proposal.clone());
+                new_proposals.push(promise_proposal);
             }
         }
 
@@ -326,7 +343,7 @@ impl Scheduler for InMemoryScheduler {
             proposal: calls.last().cloned(),
         };
 
-        Ok(action)
+        Ok((action, new_proposals))
     }
     fn get_chunks_from_event(&self, event: &EventId) -> Option<&Vec<Receipt>> {
         self.event_chunks.get(event)
@@ -518,7 +535,7 @@ mod tests {
         s.add_proposal(p.clone());
 
         let rec = receipt(&p, 0, 0, vec![], "world");
-        let action = s.satisfy_proposal(&p, rec, true).unwrap();
+        let (action, _) = s.satisfy_proposal(&p, rec, true).unwrap();
 
         assert_eq!(action.event, event(&proc("worker"), 0));
         assert_eq!(action.proposal, None);
@@ -582,7 +599,8 @@ mod tests {
     #[test]
     fn test_satisfy_proposal_mismatched_process() {
         let mut s = InMemoryScheduler::new();
-        let p = prop("hello");
+        let mut p = prop("hello");
+        p.event = Some(event(&proc("worker"), 0));
         s.add_proposal(p.clone());
 
         // Add two receipts with the same proposal
@@ -615,7 +633,9 @@ mod tests {
     #[test]
     fn test_multiple_intermediate_then_final() {
         let mut s = InMemoryScheduler::new();
-        let p = prop("hello");
+        let mut p = prop("hello");
+        let ev = event(&proc("worker"), 0);
+        p.event = Some(ev.clone());
         s.add_proposal(p.clone());
 
         // Two intermediate KV receipts
@@ -641,10 +661,10 @@ mod tests {
     #[test]
     fn test_call_after_kv_receipts() {
         let mut s = InMemoryScheduler::new();
-        let p = prop("hello");
-        s.add_proposal(p.clone());
-
+        let mut p = prop("hello");
         let ev = event(&proc("worker"), 0);
+        p.event = Some(ev.clone());
+        s.add_proposal(p.clone());
 
         // KV read receipt (intermediate)
         s.satisfy_proposal(&p, receipt(&p, 0, 0, vec![kv_read("k", "v")], ""), false)
@@ -657,7 +677,7 @@ mod tests {
         // Call receipt (final)
         let target = proc("callee");
         let call_sys = call(&target, "ping", 2, &ev);
-        let action = s
+        let (action, _) = s
             .satisfy_proposal(&p, receipt(&p, 2, 2, vec![call_sys.clone()], ""), true)
             .unwrap();
 
@@ -705,7 +725,7 @@ mod tests {
 
         // First receipt for A: contains a Call to B with a promise
         let call_sys = call(&proc_b, "hey", 0, &ev_a);
-        let action = s
+        let (action, _) = s
             .satisfy_proposal(&p_a, receipt(&p_a, 0, 0, vec![call_sys.clone()], ""), true)
             .unwrap();
 
@@ -716,7 +736,7 @@ mod tests {
         // B processes it, returning "reply"
         let ev_b = event(&proc_b, 0);
         let rec_b = receipt(&p_b, 0, 0, vec![], "reply");
-        let action = s.satisfy_proposal(&p_b, rec_b, true).unwrap();
+        let (action, _) = s.satisfy_proposal(&p_b, rec_b, true).unwrap();
 
         assert_eq!(action.event, ev_b);
 
@@ -739,7 +759,7 @@ mod tests {
         s.add_proposal(p_a.clone());
 
         let call_sys = call(&proc_b, "hey", 0, &ev_a);
-        let action = s
+        let (action, _) = s
             .satisfy_proposal(&p_a, receipt(&p_a, 0, 0, vec![call_sys.clone()], ""), true)
             .unwrap();
 
@@ -782,7 +802,9 @@ mod tests {
     #[test]
     fn test_get_chunk_from_event_by_seq() {
         let mut s = InMemoryScheduler::new();
-        let p = prop("hello");
+        let mut p = prop("hello");
+        let ev = event(&proc("worker"), 0);
+        p.event = Some(ev.clone());
         s.add_proposal(p.clone());
 
         s.satisfy_proposal(&p, receipt(&p, 0, 0, vec![], "first"), false)
