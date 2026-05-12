@@ -1,8 +1,13 @@
 use crate::types::{EventId, ProcessId};
 use anyhow::{Result, anyhow, bail};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use tokio::sync::mpsc;
 use tracing;
+
+#[derive(Debug, Clone)]
+pub struct RuntimeCall {
+    pub proposal: Proposal,
+}
 
 #[derive(Debug)]
 pub enum SchedulerMsg {
@@ -15,6 +20,13 @@ pub enum SchedulerMsg {
         tx: mpsc::UnboundedSender<Proposal>,
     },
     UnregisterExecutor {
+        process: ProcessId,
+    },
+    RegisterRuntime {
+        process: ProcessId,
+        tx: mpsc::UnboundedSender<RuntimeCall>,
+    },
+    UnregisterRuntime {
         process: ProcessId,
     },
     GetNext {
@@ -39,6 +51,11 @@ pub enum SchedulerMsg {
         is_final: bool,
         resp: tokio::sync::oneshot::Sender<Result<NextAction>>,
     },
+    RuntimeSatisfy {
+        proposal: Proposal,
+        returns: String,
+        resp: tokio::sync::oneshot::Sender<Result<NextAction>>,
+    },
 }
 
 pub async fn run_scheduler(
@@ -46,23 +63,44 @@ pub async fn run_scheduler(
     mut scheduler: Box<dyn Scheduler + Send>,
 ) {
     let mut executor_senders: HashMap<ProcessId, mpsc::UnboundedSender<Proposal>> = HashMap::new();
+    let mut runtime_senders: HashMap<ProcessId, mpsc::UnboundedSender<RuntimeCall>> =
+        HashMap::new();
+
+    fn route_proposal(
+        proposal: &Proposal,
+        executors: &HashMap<ProcessId, mpsc::UnboundedSender<Proposal>>,
+        runtimes: &HashMap<ProcessId, mpsc::UnboundedSender<RuntimeCall>>,
+    ) {
+        if let Some(rx) = runtimes.get(&proposal.process) {
+            let _ = rx.send(RuntimeCall {
+                proposal: proposal.clone(),
+            });
+        } else if let Some(tx) = executors.get(&proposal.process) {
+            let _ = tx.send(proposal.clone());
+        }
+    }
 
     while let Some(msg) = rx.recv().await {
         match msg {
             SchedulerMsg::AddProposal { proposal, resp } => {
-                let process = proposal.process.clone();
                 let id = scheduler.add_proposal(proposal.clone());
                 let _ = resp.send(id);
 
-                if let Some(tx) = executor_senders.get(&process) {
-                    let _ = tx.send(proposal);
-                }
+                route_proposal(&proposal, &executor_senders, &runtime_senders);
             }
             SchedulerMsg::RegisterExecutor { process, tx } => {
                 executor_senders.insert(process, tx);
             }
             SchedulerMsg::UnregisterExecutor { process } => {
                 executor_senders.remove(&process);
+            }
+            SchedulerMsg::RegisterRuntime { process, tx } => {
+                scheduler.register_runtime(process.clone());
+                runtime_senders.insert(process, tx);
+            }
+            SchedulerMsg::UnregisterRuntime { process } => {
+                scheduler.unregister_runtime(&process);
+                runtime_senders.remove(&process);
             }
             SchedulerMsg::GetNext { process, resp } => {
                 let proposal = scheduler.get_next_proposal(&process).cloned();
@@ -89,15 +127,38 @@ pub async fn run_scheduler(
                 let result = scheduler.satisfy_proposal(&proposal, receipt, is_final);
                 if let Ok((_action, new_proposals)) = &result {
                     if !new_proposals.is_empty() {
-                        tracing::debug!("Adding {} new proposals from satisfy:", new_proposals.len());
+                        tracing::debug!(
+                            "Adding {} new proposals from satisfy:",
+                            new_proposals.len()
+                        );
                         for p in new_proposals {
                             tracing::debug!("  -> process={} input={}", p.process.proc, p.input);
                         }
                     }
                     for p in new_proposals {
-                        if let Some(tx) = executor_senders.get(&p.process) {
-                            let _ = tx.send(p.clone());
+                        route_proposal(p, &executor_senders, &runtime_senders);
+                    }
+                }
+                let _ = resp.send(result.map(|(action, _)| action));
+            }
+            SchedulerMsg::RuntimeSatisfy {
+                proposal,
+                returns,
+                resp,
+            } => {
+                let result = scheduler.runtime_satisfy(&proposal, returns);
+                if let Ok((_action, new_proposals)) = &result {
+                    if !new_proposals.is_empty() {
+                        tracing::debug!(
+                            "Adding {} new proposals from runtime_satisfy:",
+                            new_proposals.len()
+                        );
+                        for p in new_proposals {
+                            tracing::debug!("  -> process={} input={}", p.process.proc, p.input);
                         }
+                    }
+                    for p in new_proposals {
+                        route_proposal(p, &executor_senders, &runtime_senders);
                     }
                 }
                 let _ = resp.send(result.map(|(action, _)| action));
@@ -160,6 +221,14 @@ pub trait Scheduler {
     ) -> Result<(NextAction, Vec<Proposal>)>;
     fn get_chunks_from_event(&self, event: &EventId) -> Option<&Vec<Receipt>>;
     fn get_chunk_from_event(&self, event: &EventId, chunk_seq: u64) -> Option<&Receipt>;
+    fn register_runtime(&mut self, process: ProcessId);
+    fn unregister_runtime(&mut self, process: &ProcessId);
+    fn is_runtime(&self, process: &ProcessId) -> bool;
+    fn runtime_satisfy(
+        &mut self,
+        proposal: &Proposal,
+        returns: String,
+    ) -> Result<(NextAction, Vec<Proposal>)>;
 }
 
 pub struct InMemoryScheduler {
@@ -168,6 +237,7 @@ pub struct InMemoryScheduler {
     pub schedule: HashMap<ProcessId, VecDeque<Proposal>>,
     pub event_counter: HashMap<ProcessId, u64>,
     pub proposal_counter: u64,
+    pub runtime_processes: HashSet<ProcessId>,
 }
 
 impl InMemoryScheduler {
@@ -178,6 +248,7 @@ impl InMemoryScheduler {
             schedule: HashMap::new(),
             event_counter: HashMap::new(),
             proposal_counter: 0,
+            runtime_processes: HashSet::new(),
         }
     }
 }
@@ -350,6 +421,78 @@ impl Scheduler for InMemoryScheduler {
     }
     fn get_chunk_from_event(&self, event: &EventId, chunk_seq: u64) -> Option<&Receipt> {
         self.event_chunks.get(event)?.get(chunk_seq as usize)
+    }
+
+    fn register_runtime(&mut self, process: ProcessId) {
+        self.runtime_processes.insert(process);
+    }
+
+    fn unregister_runtime(&mut self, process: &ProcessId) {
+        self.runtime_processes.remove(process);
+    }
+
+    fn is_runtime(&self, process: &ProcessId) -> bool {
+        self.runtime_processes.contains(process)
+    }
+
+    fn runtime_satisfy(
+        &mut self,
+        proposal: &Proposal,
+        returns: String,
+    ) -> Result<(NextAction, Vec<Proposal>)> {
+        let process = &proposal.process;
+
+        let schedule = self
+            .schedule
+            .get_mut(process)
+            .ok_or(anyhow!("No schedule exists for process {}", process))?;
+
+        let first_proposal = schedule
+            .get(0)
+            .ok_or(anyhow!("No proposals exist in schedule"))?
+            .clone();
+
+        if *proposal != first_proposal {
+            bail!("Proposal does not match first scheduled proposal")
+        }
+
+        schedule.pop_front();
+
+        let promise = proposal.promise.clone();
+        let promise_target = promise.as_ref().map(|p| p.target.clone());
+
+        let source_chunk_data = if let Some(ref target) = promise_target {
+            self.event_chunks
+                .get(target)
+                .and_then(|chunks| chunks.first())
+                .map(|chunk| (target.clone(), chunk.proposal.process.clone()))
+        } else {
+            None
+        };
+
+        let mut new_proposals = Vec::new();
+
+        if let Some((source_event, source_process)) = source_chunk_data {
+            let promise_proposal = Proposal {
+                event: Some(source_event),
+                process: source_process,
+                input: returns,
+                promise: None,
+            };
+            self.add_proposal(promise_proposal.clone());
+            new_proposals.push(promise_proposal);
+        }
+
+        let action = NextAction {
+            event: EventId {
+                app: process.app.clone(),
+                proc: process.proc.clone(),
+                seq: 0,
+            },
+            proposal: None,
+        };
+
+        Ok((action, new_proposals))
     }
 }
 
@@ -816,5 +959,240 @@ mod tests {
         assert_eq!(s.get_chunk_from_event(&ev, 0).unwrap().returns, "first");
         assert_eq!(s.get_chunk_from_event(&ev, 1).unwrap().returns, "second");
         assert_eq!(s.get_chunk_from_event(&ev, 2), None);
+    }
+
+    // --- Runtime process registration ---
+
+    #[test]
+    fn test_register_runtime() {
+        let mut s = InMemoryScheduler::new();
+        let p = proc("http");
+        assert!(!s.is_runtime(&p));
+        s.register_runtime(p.clone());
+        assert!(s.is_runtime(&p));
+    }
+
+    #[test]
+    fn test_unregister_runtime() {
+        let mut s = InMemoryScheduler::new();
+        let p = proc("http");
+        s.register_runtime(p.clone());
+        assert!(s.is_runtime(&p));
+        s.unregister_runtime(&p);
+        assert!(!s.is_runtime(&p));
+    }
+
+    // --- runtime_satisfy: promise resolution ---
+
+    #[test]
+    fn test_runtime_satisfy_resolves_promise() {
+        let mut s = InMemoryScheduler::new();
+
+        let caller = proc("caller");
+        let http_process = proc("http");
+        let ev = event(&caller, 0);
+
+        // Set up the caller's event with a root chunk (simulating a completed Call from the caller)
+        let p_caller = Proposal {
+            process: caller.clone(),
+            event: None,
+            input: "start".to_string(),
+            promise: None,
+        };
+        s.add_proposal(p_caller.clone());
+
+        let call_sys = call(&http_process, "https://example.com", 0, &ev);
+        let (action, _) = s
+            .satisfy_proposal(
+                &p_caller,
+                receipt(&p_caller, 0, 0, vec![call_sys], ""),
+                true,
+            )
+            .unwrap();
+
+        // The call proposal should be returned as the next action
+        let p_http = action.proposal.unwrap();
+        assert_eq!(p_http.process, http_process);
+        assert_eq!(p_http.input, "https://example.com");
+        assert!(p_http.promise.is_some());
+
+        // Add the runtime proposal to the http schedule
+        s.add_proposal(p_http.clone());
+
+        // Now satisfy the runtime call — no receipts, just the return value
+        let (action, new_proposals) = s
+            .runtime_satisfy(&p_http, "response body".to_string())
+            .unwrap();
+
+        assert_eq!(action.event.app, "test");
+        assert_eq!(action.event.proc, "http");
+        assert_eq!(action.proposal, None);
+
+        // Promise should be resolved: caller gets a new proposal with the return value
+        assert_eq!(new_proposals.len(), 1);
+        let resolved = &new_proposals[0];
+        assert_eq!(resolved.process, caller);
+        assert_eq!(resolved.input, "response body");
+        assert_eq!(resolved.event, Some(ev));
+        assert!(resolved.promise.is_none());
+
+        // The resolved proposal should be in the caller's schedule
+        let caller_next = s.get_next_proposal(&caller).unwrap();
+        assert_eq!(caller_next.input, "response body");
+    }
+
+    #[test]
+    fn test_runtime_satisfy_pops_from_schedule() {
+        let mut s = InMemoryScheduler::new();
+
+        let http_process = proc("http");
+        let p1 = Proposal {
+            process: http_process.clone(),
+            event: None,
+            input: "first".to_string(),
+            promise: None,
+        };
+        let p2 = Proposal {
+            process: http_process.clone(),
+            event: None,
+            input: "second".to_string(),
+            promise: None,
+        };
+
+        s.add_proposal(p1.clone());
+        s.add_proposal(p2.clone());
+
+        s.runtime_satisfy(&p1, "ok".to_string()).unwrap();
+
+        // p1 should be popped, p2 should be next
+        let next = s.get_next_proposal(&http_process).unwrap();
+        assert_eq!(next.input, "second");
+    }
+
+    // --- runtime_satisfy: error cases ---
+
+    #[test]
+    fn test_runtime_satisfy_no_schedule() {
+        let mut s = InMemoryScheduler::new();
+        let p = Proposal {
+            process: proc("http"),
+            event: None,
+            input: "url".to_string(),
+            promise: None,
+        };
+        let err = s.runtime_satisfy(&p, "ok".to_string()).unwrap_err();
+        assert!(err.to_string().contains("No schedule exists"));
+    }
+
+    #[test]
+    fn test_runtime_satisfy_empty_schedule() {
+        let mut s = InMemoryScheduler::new();
+        let http_process = proc("http");
+        s.add_proposal(Proposal {
+            process: http_process.clone(),
+            event: None,
+            input: "first".to_string(),
+            promise: None,
+        });
+        // Pop it to empty the schedule
+        s.schedule.get_mut(&http_process).unwrap().pop_front();
+
+        let p = Proposal {
+            process: http_process,
+            event: None,
+            input: "url".to_string(),
+            promise: None,
+        };
+        let err = s.runtime_satisfy(&p, "ok".to_string()).unwrap_err();
+        assert!(err.to_string().contains("No proposals exist in schedule"));
+    }
+
+    #[test]
+    fn test_runtime_satisfy_not_first() {
+        let mut s = InMemoryScheduler::new();
+
+        let http_process = proc("http");
+        let p1 = Proposal {
+            process: http_process.clone(),
+            event: None,
+            input: "first".to_string(),
+            promise: None,
+        };
+        let p2 = Proposal {
+            process: http_process.clone(),
+            event: None,
+            input: "second".to_string(),
+            promise: None,
+        };
+
+        s.add_proposal(p1);
+        s.add_proposal(p2.clone());
+
+        // Try to satisfy p2 while p1 is still first in queue
+        let err = s.runtime_satisfy(&p2, "ok".to_string()).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Proposal does not match first scheduled proposal")
+        );
+    }
+
+    // --- runtime_satisfy: no receipts stored ---
+
+    #[test]
+    fn test_runtime_satisfy_no_receipts_stored() {
+        let mut s = InMemoryScheduler::new();
+
+        let caller = proc("caller");
+        let http_process = proc("http");
+        let ev = event(&caller, 0);
+
+        // Set up caller's event
+        let p_caller = Proposal {
+            process: caller.clone(),
+            event: None,
+            input: "start".to_string(),
+            promise: None,
+        };
+        s.add_proposal(p_caller.clone());
+
+        let call_sys = call(&http_process, "https://example.com", 0, &ev);
+        let (action, _) = s
+            .satisfy_proposal(
+                &p_caller,
+                receipt(&p_caller, 0, 0, vec![call_sys], ""),
+                true,
+            )
+            .unwrap();
+
+        let p_http = action.proposal.unwrap();
+        s.add_proposal(p_http.clone());
+        s.runtime_satisfy(&p_http, "response".to_string()).unwrap();
+
+        // The runtime process should have NO chunks stored
+        assert!(s.process_chunks.get(&http_process).is_none());
+        assert!(s.event_chunks.get(&event(&http_process, 0)).is_none());
+
+        // But the caller's chunks should still exist (they go through normal satisfy)
+        assert!(s.process_chunks.get(&caller).is_some());
+    }
+
+    // --- runtime_satisfy: no promise (no new proposals) ---
+
+    #[test]
+    fn test_runtime_satisfy_no_promise_no_new_proposals() {
+        let mut s = InMemoryScheduler::new();
+
+        let http_process = proc("http");
+        let p = Proposal {
+            process: http_process.clone(),
+            event: None,
+            input: "url".to_string(),
+            promise: None,
+        };
+        s.add_proposal(p.clone());
+
+        let (_action, new_proposals) = s.runtime_satisfy(&p, "ok".to_string()).unwrap();
+
+        assert!(new_proposals.is_empty());
     }
 }

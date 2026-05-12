@@ -29,11 +29,7 @@ pub async fn run_state(mut rx: mpsc::UnboundedReceiver<StateMsg>, mut state: InM
                 state.set(&process, &key, value);
                 let _ = resp.send(());
             }
-            StateMsg::Get {
-                process,
-                key,
-                resp,
-            } => {
+            StateMsg::Get { process, key, resp } => {
                 let value = state.get(&process, &key);
                 let _ = resp.send(value);
             }

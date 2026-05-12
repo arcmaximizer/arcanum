@@ -4,11 +4,31 @@ mod state;
 mod store;
 mod types;
 
-use scheduler::{InMemoryScheduler, Proposal, SchedulerMsg};
+use scheduler::{InMemoryScheduler, Proposal, RuntimeCall, SchedulerMsg};
 use state::{InMemoryKVState, StateMsg};
 use tokio::sync::mpsc;
-use types::ProcessId;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use types::ProcessId;
+
+async fn run_http_process(
+    mut rx: mpsc::UnboundedReceiver<RuntimeCall>,
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMsg>,
+) {
+    while let Some(call) = rx.recv().await {
+        tracing::debug!("HTTP process: got request for {}", call.proposal.input);
+
+        let response = format!("fetched: {}", call.proposal.input);
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        scheduler_tx
+            .send(SchedulerMsg::RuntimeSatisfy {
+                proposal: call.proposal,
+                returns: response,
+                resp: tx,
+            })
+            .unwrap();
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -76,6 +96,22 @@ async fn main() {
         end"#
             .to_string(),
     ));
+
+    // Register sys/http as a runtime process
+    let http_process = ProcessId {
+        app: "sys".to_string(),
+        proc: "http".to_string(),
+    };
+    let (http_tx, http_rx) = mpsc::unbounded_channel::<RuntimeCall>();
+
+    scheduler_tx
+        .send(SchedulerMsg::RegisterRuntime {
+            process: http_process.clone(),
+            tx: http_tx,
+        })
+        .unwrap();
+
+    tokio::spawn(run_http_process(http_rx, scheduler_tx.clone()));
 
     // Submit initial proposals via scheduler
     scheduler_tx

@@ -187,7 +187,12 @@ pub async fn run_executor(
     let mut kv_state: HashMap<String, String> = HashMap::new();
 
     while let Some(proposal) = work_rx.recv().await {
-        tracing::debug!("Received proposal: process={}/{} input={}", proposal.process.app, proposal.process.proc, proposal.input);
+        tracing::debug!(
+            "Received proposal: process={}/{} input={}",
+            proposal.process.app,
+            proposal.process.proc,
+            proposal.input
+        );
         let event = if let Some(ref e) = proposal.event {
             e.clone()
         } else {
@@ -204,18 +209,22 @@ pub async fn run_executor(
             e
         };
 
-        let thread = threads
-            .entry(event.clone())
-            .or_insert_with(|| {
-                tracing::debug!("Creating new Lua thread for event {:?}", event);
-                lua.create_thread(wrapped.clone()).unwrap()
-            });
+        let thread = threads.entry(event.clone()).or_insert_with(|| {
+            tracing::debug!("Creating new Lua thread for event {:?}", event);
+            lua.create_thread(wrapped.clone()).unwrap()
+        });
 
         let mut input = mlua::Value::String(lua.create_string(&proposal.input).unwrap());
 
         loop {
             let in_event_seq = *event_seqs.entry(event.clone()).or_insert(0);
-            tracing::debug!("Loop start: event={}/{} seq={} in_event_seq={}", event.app, event.proc, event.seq, in_event_seq);
+            tracing::debug!(
+                "Loop start: event={}/{} seq={} in_event_seq={}",
+                event.app,
+                event.proc,
+                event.seq,
+                in_event_seq
+            );
 
             let (tx_log, rx_log) = oneshot::channel();
             scheduler_tx
@@ -256,7 +265,12 @@ pub async fn run_executor(
                         })
                         .unwrap();
                     let next_action = rx.await.unwrap().unwrap();
-                    tracing::debug!("Got next action: event={}/{} proposal={:?}", next_action.event.app, next_action.event.proc, next_action.proposal);
+                    tracing::debug!(
+                        "Got next action: event={}/{} proposal={:?}",
+                        next_action.event.app,
+                        next_action.event.proc,
+                        next_action.proposal
+                    );
 
                     event_seqs.insert(event.clone(), in_event_seq + 1);
 
@@ -284,11 +298,21 @@ pub async fn run_executor(
                             input = mlua::Value::Nil;
                         }
                         Syscall::Notify { proposal, .. } => {
-                            tracing::debug!("Notify: target={}/{} input={}", proposal.process.app, proposal.process.proc, proposal.input);
+                            tracing::debug!(
+                                "Notify: target={}/{} input={}",
+                                proposal.process.app,
+                                proposal.process.proc,
+                                proposal.input
+                            );
                             input = mlua::Value::Nil;
                         }
                         Syscall::Call { proposal, .. } => {
-                            tracing::debug!("Call: target={}/{} input={}", proposal.process.app, proposal.process.proc, proposal.input);
+                            tracing::debug!(
+                                "Call: target={}/{} input={}",
+                                proposal.process.app,
+                                proposal.process.proc,
+                                proposal.input
+                            );
                             let (tx, _rx) = oneshot::channel();
                             scheduler_tx
                                 .send(SchedulerMsg::AddProposal {
