@@ -114,17 +114,17 @@ async fn main() {
     tokio::spawn(run_http_process(http_rx, scheduler_tx.clone()));
 
     // Submit initial proposals via scheduler
-    scheduler_tx
-        .send(SchedulerMsg::AddProposal {
-            proposal: Proposal {
-                process: echo_process.clone(),
-                event: None,
-                input: "hello".to_string(),
-                promise: None,
-            },
-            resp: tokio::sync::oneshot::channel().0,
-        })
-        .unwrap();
+    /*scheduler_tx
+    .send(SchedulerMsg::AddProposal {
+        proposal: Proposal {
+            process: echo_process.clone(),
+            event: None,
+            input: "hello".to_string(),
+            promise: None,
+        },
+        resp: tokio::sync::oneshot::channel().0,
+    })
+    .unwrap();*/
 
     scheduler_tx
         .send(SchedulerMsg::AddProposal {
