@@ -48,8 +48,9 @@ async fn main() {
 
     // Create echo process
     let echo_process = ProcessId {
-        app: "arc".to_string(),
-        proc: "echo/entrypoint".to_string(),
+        namespace: "arc".to_string(),
+        app: "echo".to_string(),
+        proc: "entrypoint".to_string(),
     };
     let (echo_tx, echo_rx) = mpsc::unbounded_channel::<Proposal>();
 
@@ -74,8 +75,9 @@ async fn main() {
 
     // Create hello process
     let hello_process = ProcessId {
-        app: "arc".to_string(),
-        proc: "hello/entrypoint".to_string(),
+        namespace: "arc".to_string(),
+        app: "hello".to_string(),
+        proc: "entrypoint".to_string(),
     };
     let (hello_tx, hello_rx) = mpsc::unbounded_channel::<Proposal>();
 
@@ -99,8 +101,9 @@ async fn main() {
 
     // Register sys/http as a runtime process
     let http_process = ProcessId {
-        app: "sys".to_string(),
-        proc: "http".to_string(),
+        namespace: "sys".to_string(),
+        app: "http".to_string(),
+        proc: "runtime".to_string(),
     };
     let (http_tx, http_rx) = mpsc::unbounded_channel::<RuntimeCall>();
 
@@ -114,22 +117,23 @@ async fn main() {
     tokio::spawn(run_http_process(http_rx, scheduler_tx.clone()));
 
     // Submit initial proposals via scheduler
-    /*scheduler_tx
-    .send(SchedulerMsg::AddProposal {
-        proposal: Proposal {
-            process: echo_process.clone(),
-            event: None,
-            input: "hello".to_string(),
-            promise: None,
-        },
-        resp: tokio::sync::oneshot::channel().0,
-    })
-    .unwrap();*/
 
     scheduler_tx
         .send(SchedulerMsg::AddProposal {
             proposal: Proposal {
-                process: hello_process,
+                process: hello_process.clone(),
+                event: None,
+                input: "start".to_string(),
+                promise: None,
+            },
+            resp: tokio::sync::oneshot::channel().0,
+        })
+        .unwrap();
+
+    scheduler_tx
+        .send(SchedulerMsg::AddProposal {
+            proposal: Proposal {
+                process: hello_process.clone(),
                 event: None,
                 input: "start".to_string(),
                 promise: None,

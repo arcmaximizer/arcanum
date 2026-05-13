@@ -94,8 +94,9 @@ fn parse_syscall(
             Syscall::Call {
                 proposal: Proposal {
                     process: types::ProcessId {
-                        app: "sys".to_string(),
-                        proc: "http".to_string(),
+                        namespace: "sys".to_string(),
+                        app: "http".to_string(),
+                        proc: "runtime".to_string(),
                     },
                     event: None,
                     input: url,
@@ -111,20 +112,19 @@ fn parse_syscall(
                 .as_ref()
                 .and_then(|a| a.get::<String>(1).ok())
                 .unwrap_or_default();
+            let process =
+                types::ProcessId::try_from(target.as_str()).unwrap_or_else(|_| types::ProcessId {
+                    namespace: String::new(),
+                    app: String::new(),
+                    proc: String::new(),
+                });
             let input = args
                 .as_ref()
                 .and_then(|a| a.get::<String>(2).ok())
                 .unwrap_or_default();
-            let (app, proc) = target
-                .strip_prefix("^")
-                .and_then(|t| t.split_once('/'))
-                .unwrap_or(("", ""));
             Syscall::Call {
                 proposal: Proposal {
-                    process: types::ProcessId {
-                        app: app.to_string(),
-                        proc: proc.to_string(),
-                    },
+                    process,
                     event: None,
                     input,
                     promise: Some(scheduler::Promise {
@@ -139,20 +139,19 @@ fn parse_syscall(
                 .as_ref()
                 .and_then(|a| a.get::<String>(1).ok())
                 .unwrap_or_default();
+            let process =
+                types::ProcessId::try_from(target.as_str()).unwrap_or_else(|_| types::ProcessId {
+                    namespace: String::new(),
+                    app: String::new(),
+                    proc: String::new(),
+                });
             let input = args
                 .as_ref()
                 .and_then(|a| a.get::<String>(2).ok())
                 .unwrap_or_default();
-            let (app, proc) = target
-                .strip_prefix("^")
-                .and_then(|t| t.split_once('/'))
-                .unwrap_or(("", ""));
             Syscall::Notify {
                 proposal: Proposal {
-                    process: types::ProcessId {
-                        app: app.to_string(),
-                        proc: proc.to_string(),
-                    },
+                    process,
                     event: None,
                     input,
                     promise: None,
@@ -188,10 +187,9 @@ pub async fn run_executor(
 
     while let Some(proposal) = work_rx.recv().await {
         tracing::debug!(
-            "Received proposal: process={}/{} input={}",
-            proposal.process.app,
-            proposal.process.proc,
-            proposal.input
+            "Received proposal: process={} input={}",
+            proposal.process,
+            proposal.input,
         );
         let event = if let Some(ref e) = proposal.event {
             e.clone()
@@ -205,12 +203,16 @@ pub async fn run_executor(
                 })
                 .unwrap();
             let e = rx.await.unwrap();
-            tracing::debug!("Got event ID: {}/{} seq={}", e.app, e.proc, e.seq);
+            tracing::debug!(
+                "Got event ID: {} seq={}",
+                e,
+                e.seq,
+            );
             e
         };
 
         let thread = threads.entry(event.clone()).or_insert_with(|| {
-            tracing::debug!("Creating new Lua thread for event {:?}", event);
+            tracing::debug!("Creating new Lua thread for event {}", event);
             lua.create_thread(wrapped.clone()).unwrap()
         });
 
@@ -219,10 +221,8 @@ pub async fn run_executor(
         loop {
             let in_event_seq = *event_seqs.entry(event.clone()).or_insert(0);
             tracing::debug!(
-                "Loop start: event={}/{} seq={} in_event_seq={}",
-                event.app,
-                event.proc,
-                event.seq,
+                "Loop start: event={} in_event_seq={}",
+                event,
                 in_event_seq
             );
 
@@ -266,9 +266,8 @@ pub async fn run_executor(
                         .unwrap();
                     let next_action = rx.await.unwrap().unwrap();
                     tracing::debug!(
-                        "Got next action: event={}/{} proposal={:?}",
-                        next_action.event.app,
-                        next_action.event.proc,
+                        "Got next action: event={} proposal={:?}",
+                        next_action.event,
                         next_action.proposal
                     );
 
@@ -299,18 +298,16 @@ pub async fn run_executor(
                         }
                         Syscall::Notify { proposal, .. } => {
                             tracing::debug!(
-                                "Notify: target={}/{} input={}",
-                                proposal.process.app,
-                                proposal.process.proc,
+                                "Notify: target={} input={}",
+                                proposal.process,
                                 proposal.input
                             );
                             input = mlua::Value::Nil;
                         }
                         Syscall::Call { proposal, .. } => {
                             tracing::debug!(
-                                "Call: target={}/{} input={}",
-                                proposal.process.app,
-                                proposal.process.proc,
+                                "Call: target={} input={}",
+                                proposal.process,
                                 proposal.input
                             );
                             let (tx, _rx) = oneshot::channel();
@@ -401,7 +398,8 @@ mod tests {
             let (state_tx, state_rx) = mpsc::unbounded_channel::<StateMsg>();
 
             let process = ProcessId {
-                app: "test".to_string(),
+                namespace: "test".to_string(),
+                app: "p".to_string(),
                 proc: "p".to_string(),
             };
 
@@ -438,7 +436,8 @@ mod tests {
                 SchedulerMsg::GetNextEventId { process, resp } => {
                     assert_eq!(process, self.process);
                     let event = EventId {
-                        app: "test".to_string(),
+                        namespace: "test".to_string(),
+                        app: "p".to_string(),
                         proc: "p".to_string(),
                         seq: 0,
                     };
@@ -514,43 +513,44 @@ mod tests {
             let mut got_log_seq = false;
             loop {
                 tokio::select! {
-                    msg = self.scheduler_rx.recv() => {
-                        match msg {
-                            Some(SchedulerMsg::GetLogSeq { process, resp }) => {
-                                assert_eq!(process, self.process);
-                                let seq = self.log_seq;
-                                resp.send(seq).unwrap();
-                                got_log_seq = true;
-                            }
-                            Some(SchedulerMsg::GetNextEventId { process, resp }) => {
-                                assert_eq!(process, self.process);
-                                resp.send(EventId {
-                                    app: "test".to_string(),
-                                    proc: "p".to_string(),
-                                    seq: 0,
-                                }).unwrap();
-                            }
-                            Some(SchedulerMsg::Satisfy { resp, .. }) => {
-                                resp.send(Ok(NextAction {
-                                    event: EventId { app: "test".to_string(), proc: "p".to_string(), seq: 0 },
-                                    proposal: None,
-                                })).unwrap();
-                            }
-                            _ => {}
-                        }
-                    }
-                    msg = self.state_rx.recv() => {
-                        match msg {
-                            Some(StateMsg::Set { resp, .. }) => {
-                                resp.send(()).unwrap();
-                            }
-                            Some(StateMsg::Get { resp, .. }) => {
-                                resp.send(None).unwrap();
-                            }
-                            None => break,
-                        }
-                    }
-                }
+                                    msg = self.scheduler_rx.recv() => {
+                                        match msg {
+                                            Some(SchedulerMsg::GetLogSeq { process, resp }) => {
+                                                assert_eq!(process, self.process);
+                                                let seq = self.log_seq;
+                                                resp.send(seq).unwrap();
+                                                got_log_seq = true;
+                                            }
+                                            Some(SchedulerMsg::GetNextEventId { process, resp }) => {
+                                                assert_eq!(process, self.process);
+                                                resp.send(EventId {
+                namespace: "test".to_string(),
+                                                app: "p".to_string(),
+                                                proc: "p".to_string(),
+                                                seq: 0,
+                                            }).unwrap();
+                                            }
+                                            Some(SchedulerMsg::Satisfy { resp, .. }) => {
+                                                resp.send(Ok(NextAction {
+                                                    event: EventId { namespace: "test".to_string(), app: "p".to_string(), proc: "p".to_string(), seq: 0 },
+                                                    proposal: None,
+                                                })).unwrap();
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    msg = self.state_rx.recv() => {
+                                        match msg {
+                                            Some(StateMsg::Set { resp, .. }) => {
+                                                resp.send(()).unwrap();
+                                            }
+                                            Some(StateMsg::Get { resp, .. }) => {
+                                                resp.send(None).unwrap();
+                                            }
+                                            None => break,
+                                        }
+                                    }
+                                }
                 if got_log_seq {
                     break;
                 }
@@ -709,8 +709,9 @@ mod tests {
 
         match &receipt.syscalls[0] {
             Syscall::Call { proposal } => {
-                assert_eq!(proposal.process.app, "sys");
-                assert_eq!(proposal.process.proc, "http");
+                assert_eq!(proposal.process.namespace, "sys");
+                assert_eq!(proposal.process.app, "http");
+                assert_eq!(proposal.process.proc, "runtime");
                 assert_eq!(proposal.input, "https://example.com");
                 assert_eq!(
                     proposal.promise,
@@ -752,7 +753,7 @@ mod tests {
         // Call (final)
         let (rec2, resp2) = h.expect_satisfy(true).await;
         assert!(
-            matches!(&rec2.syscalls[0], Syscall::Call { proposal } if proposal.process.app == "sys")
+            matches!(&rec2.syscalls[0], Syscall::Call { proposal } if proposal.process.namespace == "sys")
         );
         h.respond_satisfy(resp2, event);
     }
@@ -779,7 +780,8 @@ mod tests {
             // Handle any other messages
             if let SchedulerMsg::GetNextEventId { resp, .. } = msg {
                 resp.send(EventId {
-                    app: "test".to_string(),
+                    namespace: "test".to_string(),
+                    app: "p".to_string(),
                     proc: "p".to_string(),
                     seq: 0,
                 })

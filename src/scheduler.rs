@@ -132,7 +132,11 @@ pub async fn run_scheduler(
                             new_proposals.len()
                         );
                         for p in new_proposals {
-                            tracing::debug!("  -> process={} input={}", p.process.proc, p.input);
+                            tracing::debug!(
+                                "  -> process={} input={}",
+                                p.process,
+                                p.input
+                            );
                         }
                     }
                     for p in new_proposals {
@@ -154,7 +158,11 @@ pub async fn run_scheduler(
                             new_proposals.len()
                         );
                         for p in new_proposals {
-                            tracing::debug!("  -> process={} input={}", p.process.proc, p.input);
+                            tracing::debug!(
+                                "  -> process={} input={}",
+                                p.process,
+                                p.input
+                            );
                         }
                     }
                     for p in new_proposals {
@@ -269,6 +277,7 @@ impl Scheduler for InMemoryScheduler {
     fn get_next_event_id(&mut self, process: &ProcessId) -> EventId {
         let seq = *self.event_counter.entry(process.clone()).or_insert(0);
         EventId {
+            namespace: process.namespace.clone(),
             app: process.app.clone(),
             proc: process.proc.clone(),
             seq,
@@ -298,6 +307,7 @@ impl Scheduler for InMemoryScheduler {
             self.event_counter.insert(process.clone(), event_id + 1);
         }
         let event = proposal.event.clone().unwrap_or(EventId {
+            namespace: process.namespace.clone(),
             app: process.app.clone(),
             proc: process.proc.clone(),
             seq: event_id,
@@ -442,10 +452,10 @@ impl Scheduler for InMemoryScheduler {
     ) -> Result<(NextAction, Vec<Proposal>)> {
         let process = &proposal.process;
 
-        let schedule = self
-            .schedule
-            .get_mut(process)
-            .ok_or(anyhow!("No schedule exists for process {}", process))?;
+        let schedule = self.schedule.get_mut(process).ok_or(anyhow!(
+            "No schedule exists for process {}",
+            process
+        ))?;
 
         let first_proposal = schedule
             .get(0)
@@ -485,6 +495,7 @@ impl Scheduler for InMemoryScheduler {
 
         let action = NextAction {
             event: EventId {
+                namespace: process.namespace.clone(),
                 app: process.app.clone(),
                 proc: process.proc.clone(),
                 seq: 0,
@@ -502,13 +513,15 @@ mod tests {
 
     fn proc(id: &str) -> ProcessId {
         ProcessId {
-            app: "test".to_string(),
+            namespace: "test".to_string(),
+            app: id.to_string(),
             proc: id.to_string(),
         }
     }
 
     fn event(p: &ProcessId, seq: u64) -> EventId {
         EventId {
+            namespace: p.namespace.clone(),
             app: p.app.clone(),
             proc: p.proc.clone(),
             seq,
@@ -644,7 +657,8 @@ mod tests {
         let mut s = InMemoryScheduler::new();
         let e = s.get_next_event_id(&proc("worker"));
         assert_eq!(e.seq, 0);
-        assert_eq!(e.app, "test");
+        assert_eq!(e.namespace, "test");
+        assert_eq!(e.app, "worker");
         assert_eq!(e.proc, "worker");
     }
 
@@ -1024,7 +1038,8 @@ mod tests {
             .runtime_satisfy(&p_http, "response body".to_string())
             .unwrap();
 
-        assert_eq!(action.event.app, "test");
+        assert_eq!(action.event.namespace, "test");
+        assert_eq!(action.event.app, "http");
         assert_eq!(action.event.proc, "http");
         assert_eq!(action.proposal, None);
 
