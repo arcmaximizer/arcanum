@@ -132,11 +132,16 @@ pub async fn run_scheduler(
                             new_proposals.len()
                         );
                         for p in new_proposals {
-                            tracing::debug!(
-                                "  -> process={} input={}",
-                                p.process,
-                                p.input
-                            );
+                            if let Some(ref promise) = p.promise {
+                                tracing::debug!(
+                                    "  -> process={} {} input={}",
+                                    p.process,
+                                    promise,
+                                    p.input
+                                );
+                            } else {
+                                tracing::debug!("  -> process={} input={}", p.process, p.input);
+                            }
                         }
                     }
                     for p in new_proposals {
@@ -158,11 +163,16 @@ pub async fn run_scheduler(
                             new_proposals.len()
                         );
                         for p in new_proposals {
-                            tracing::debug!(
-                                "  -> process={} input={}",
-                                p.process,
-                                p.input
-                            );
+                            if let Some(ref promise) = p.promise {
+                                tracing::debug!(
+                                    "  -> process={} {} input={}",
+                                    p.process,
+                                    promise,
+                                    p.input
+                                );
+                            } else {
+                                tracing::debug!("  -> process={} input={}", p.process, p.input);
+                            }
                         }
                     }
                     for p in new_proposals {
@@ -208,6 +218,12 @@ pub struct Proposal {
 pub struct Promise {
     pub id: u64,
     pub target: EventId,
+}
+
+impl std::fmt::Display for Promise {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "P{} -> {}", self.id, self.target)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -452,10 +468,10 @@ impl Scheduler for InMemoryScheduler {
     ) -> Result<(NextAction, Vec<Proposal>)> {
         let process = &proposal.process;
 
-        let schedule = self.schedule.get_mut(process).ok_or(anyhow!(
-            "No schedule exists for process {}",
-            process
-        ))?;
+        let schedule = self
+            .schedule
+            .get_mut(process)
+            .ok_or(anyhow!("No schedule exists for process {}", process))?;
 
         let first_proposal = schedule
             .get(0)

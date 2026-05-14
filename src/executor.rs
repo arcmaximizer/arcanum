@@ -186,11 +186,20 @@ pub async fn run_executor(
     let mut kv_state: HashMap<String, String> = HashMap::new();
 
     while let Some(proposal) = work_rx.recv().await {
-        tracing::debug!(
-            "Received proposal: process={} input={}",
-            proposal.process,
-            proposal.input,
-        );
+        if let Some(ref promise) = proposal.promise {
+            tracing::debug!(
+                "Received proposal: process={} {} input={}",
+                proposal.process,
+                promise,
+                proposal.input,
+            );
+        } else {
+            tracing::debug!(
+                "Received proposal: process={} input={}",
+                proposal.process,
+                proposal.input,
+            );
+        }
         let event = if let Some(ref e) = proposal.event {
             e.clone()
         } else {
@@ -203,16 +212,12 @@ pub async fn run_executor(
                 })
                 .unwrap();
             let e = rx.await.unwrap();
-            tracing::debug!(
-                "Got event ID: {} seq={}",
-                e,
-                e.seq,
-            );
+            tracing::debug!("event={} Got event ID: seq={}", e, e.seq);
             e
         };
 
         let thread = threads.entry(event.clone()).or_insert_with(|| {
-            tracing::debug!("Creating new Lua thread for event {}", event);
+            tracing::debug!("event={} Creating new Lua thread", event);
             lua.create_thread(wrapped.clone()).unwrap()
         });
 
@@ -220,11 +225,7 @@ pub async fn run_executor(
 
         loop {
             let in_event_seq = *event_seqs.entry(event.clone()).or_insert(0);
-            tracing::debug!(
-                "Loop start: event={} in_event_seq={}",
-                event,
-                in_event_seq
-            );
+            tracing::debug!("Loop start: event={} in_event_seq={}", event, in_event_seq);
 
             let (tx_log, rx_log) = oneshot::channel();
             scheduler_tx
@@ -234,15 +235,15 @@ pub async fn run_executor(
                 })
                 .unwrap();
             let log_seq = rx_log.await.unwrap();
-            tracing::debug!("Got log_seq={}", log_seq);
+            tracing::debug!("event={} Got log_seq={}", event, log_seq);
 
-            tracing::debug!("Resuming Lua thread with input={:?}", input);
+            tracing::debug!("event={} Resuming Lua thread with input={:?}", event, input);
             match thread.resume::<mlua::Value>(input.clone()) {
                 Ok(mlua::Value::Table(table)) => {
-                    tracing::debug!("Got syscall from Lua");
+                    tracing::debug!("event={} Got syscall from Lua", event);
                     let syscall =
                         parse_syscall(&mlua::Value::Table(table), &event, log_seq, &kv_state);
-                    tracing::debug!("Parsed syscall: {:?}", syscall);
+                    tracing::debug!("event={} Parsed syscall: {:?}", event, syscall);
 
                     let receipt = Receipt {
                         proposal: proposal.clone(),
@@ -253,7 +254,11 @@ pub async fn run_executor(
                     };
 
                     let is_final_syscall = is_non_blocking(&syscall);
-                    tracing::debug!("Sending satisfy: is_final={}", is_final_syscall);
+                    tracing::debug!(
+                        "event={} Sending satisfy: is_final={}",
+                        event,
+                        is_final_syscall
+                    );
 
                     let (tx, rx) = oneshot::channel();
                     scheduler_tx
@@ -275,13 +280,18 @@ pub async fn run_executor(
 
                     match syscall {
                         Syscall::KVRead { key, .. } => {
-                            tracing::debug!("KVRead: key={}", key);
+                            tracing::debug!("event={} KVRead: key={}", event, key);
                             let value = kv_state.get(&key).cloned().unwrap_or_default();
-                            tracing::debug!("KVRead: value={}", value);
+                            tracing::debug!("event={} KVRead: value={}", event, value);
                             input = mlua::Value::String(lua.create_string(&value).unwrap());
                         }
                         Syscall::KVWrite { key, new_value } => {
-                            tracing::debug!("KVWrite: key={} value={}", key, new_value);
+                            tracing::debug!(
+                                "event={} KVWrite: key={} value={}",
+                                event,
+                                key,
+                                new_value
+                            );
                             let (tx, rx) = oneshot::channel();
                             state_tx
                                 .send(StateMsg::Set {
@@ -293,23 +303,35 @@ pub async fn run_executor(
                                 .unwrap();
                             rx.await.unwrap();
                             kv_state.insert(key, new_value);
-                            tracing::debug!("KVWrite: state updated");
+                            tracing::debug!("event={} KVWrite: state updated", event);
                             input = mlua::Value::Nil;
                         }
                         Syscall::Notify { proposal, .. } => {
                             tracing::debug!(
-                                "Notify: target={} input={}",
+                                "event={} Notify: target={} input={}",
+                                event,
                                 proposal.process,
                                 proposal.input
                             );
                             input = mlua::Value::Nil;
                         }
                         Syscall::Call { proposal, .. } => {
-                            tracing::debug!(
-                                "Call: target={} input={}",
-                                proposal.process,
-                                proposal.input
-                            );
+                            if let Some(ref promise) = proposal.promise {
+                                tracing::debug!(
+                                    "event={} Call: target={} {} input={}",
+                                    event,
+                                    proposal.process,
+                                    promise,
+                                    proposal.input
+                                );
+                            } else {
+                                tracing::debug!(
+                                    "event={} Call: target={} input={}",
+                                    event,
+                                    proposal.process,
+                                    proposal.input
+                                );
+                            }
                             let (tx, _rx) = oneshot::channel();
                             scheduler_tx
                                 .send(SchedulerMsg::AddProposal {
@@ -322,9 +344,9 @@ pub async fn run_executor(
                     }
                 }
                 Ok(return_value) => {
-                    tracing::debug!("Lua returned: {:?}", return_value);
+                    tracing::debug!("event={} Lua returned: {:?}", event, return_value);
                     let returns = extract_return(&return_value, &lua);
-                    tracing::debug!("Extracted return: '{}'", returns);
+                    tracing::debug!("event={} Extracted return: '{}'", event, returns);
                     let in_event_seq = *event_seqs.entry(event.clone()).or_insert(0);
 
                     let receipt = Receipt {
@@ -344,16 +366,16 @@ pub async fn run_executor(
                             resp: tx,
                         })
                         .unwrap();
-                    tracing::debug!("Sent final satisfy, awaiting response");
+                    tracing::debug!("event={} Sent final satisfy, awaiting response", event);
                     rx.await.unwrap().unwrap();
-                    tracing::debug!("Final satisfy complete, breaking loop");
+                    tracing::debug!("event={} Final satisfy complete, breaking loop", event);
 
                     threads.remove(&event);
                     break;
                 }
                 Err(e) => {
-                    tracing::error!("Lua error: {}", e);
-                    tracing::debug!("Lua error occurred, breaking loop");
+                    tracing::error!("event={} Lua error: {}", event, e);
+                    tracing::debug!("event={} Lua error occurred, breaking loop", event);
                     threads.remove(&event);
                     break;
                 }
