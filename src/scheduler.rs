@@ -50,12 +50,12 @@ pub enum SchedulerMsg {
         proposal: Proposal,
         receipt: Receipt,
         completes_proposal: bool,
-        resp: tokio::sync::oneshot::Sender<Result<NextAction>>,
+        resp: tokio::sync::oneshot::Sender<Result<()>>,
     },
     RuntimeSatisfy {
         proposal: Proposal,
         returns: Vec<u8>,
-        resp: tokio::sync::oneshot::Sender<Result<NextAction>>,
+        resp: tokio::sync::oneshot::Sender<Result<()>>,
     },
 }
 
@@ -153,7 +153,7 @@ pub async fn run_scheduler(
                         route_proposal(p, &executor_senders, &runtime_senders);
                     }
                 }
-                let _ = resp.send(result.map(|(action, _)| action));
+                let _ = resp.send(result.map(|_| ()));
             }
             SchedulerMsg::RuntimeSatisfy {
                 proposal,
@@ -188,7 +188,7 @@ pub async fn run_scheduler(
                         route_proposal(p, &executor_senders, &runtime_senders);
                     }
                 }
-                let _ = resp.send(result.map(|(action, _)| action));
+                let _ = resp.send(result.map(|_| ()));
             }
         }
     }
@@ -294,7 +294,7 @@ impl SchedulerHandle {
         proposal: Proposal,
         receipt: Receipt,
         completes_proposal: bool,
-    ) -> Result<NextAction> {
+    ) -> Result<()> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.sender
             .send(SchedulerMsg::Satisfy {
@@ -311,7 +311,7 @@ impl SchedulerHandle {
         &self,
         proposal: Proposal,
         returns: Vec<u8>,
-    ) -> Result<NextAction> {
+    ) -> Result<()> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.sender
             .send(SchedulerMsg::RuntimeSatisfy {
@@ -322,6 +322,13 @@ impl SchedulerHandle {
             .expect("Scheduler task has been killed");
         resp_rx.await.expect("Scheduler task has been killed")
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RuntimeStatus {
+    Normal,
+    Error,
+    End,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -335,6 +342,7 @@ pub struct Receipt {
     pub in_log_seq: u64,
     pub syscalls: Vec<Syscall>,
     pub returns: Vec<u8>,
+    pub status: RuntimeStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -457,16 +465,27 @@ impl Scheduler for InMemoryScheduler {
         let process = &proposal.process;
         let in_log_seq = receipt.in_log_seq;
         let in_event_seq = receipt.in_event_seq;
-        let event_id = *self.event_counter.entry(process.clone()).or_insert(0);
-        if proposal.event.is_none() {
+        let event = if let Some(ref e) = proposal.event {
+            e.clone()
+        } else if in_event_seq == 0 {
+            let event_id = *self.event_counter.entry(process.clone()).or_insert(0);
             self.event_counter.insert(process.clone(), event_id + 1);
-        }
-        let event = proposal.event.clone().unwrap_or(EventId {
-            namespace: process.namespace.clone(),
-            app: process.app.clone(),
-            proc: process.proc.clone(),
-            seq: event_id,
-        });
+            EventId {
+                namespace: process.namespace.clone(),
+                app: process.app.clone(),
+                proc: process.proc.clone(),
+                seq: event_id,
+            }
+        } else {
+            // Reuse the event assigned on the first chunk (in_event_seq == 0)
+            let event_id = *self.event_counter.entry(process.clone()).or_insert(0);
+            EventId {
+                namespace: process.namespace.clone(),
+                app: process.app.clone(),
+                proc: process.proc.clone(),
+                seq: event_id.saturating_sub(1),
+            }
+        };
 
         let schedule = self
             .schedule

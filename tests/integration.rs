@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use arcanum::executor::ExecutorHandle;
 use arcanum::scheduler::{
-    InMemoryScheduler, Proposal, Receipt, ReceiptStatus, SchedulerHandle, Syscall,
+    InMemoryScheduler, Proposal, Receipt, RuntimeStatus, SchedulerHandle, Syscall,
 };
 use arcanum::state::{InMemoryKVState, StateHandle};
 use arcanum::types::{EventId, ProcessId};
@@ -18,6 +18,10 @@ fn mp_null() -> Vec<u8> {
 
 fn msgpack_value(value: &serde_json::Value) -> Vec<u8> {
     rmp_serde::to_vec(value).unwrap()
+}
+
+fn mp_data(s: &str) -> Vec<u8> {
+    msgpack_value(&serde_json::json!({"data": s}))
 }
 
 async fn wait_for_chunks(
@@ -112,7 +116,8 @@ async fn test_basic_return() {
 
     let chunks = wait_for_chunks(&scheduler, event, 1, Duration::from_secs(2)).await;
     assert_eq!(chunks.len(), 1);
-    assert_eq!(chunks[0].status, ReceiptStatus::End(mp("hello")));
+    assert_eq!(chunks[0].status, RuntimeStatus::End);
+    assert_eq!(chunks[0].returns, mp_data("hello"));
     assert_eq!(chunks[0].syscalls, vec![]);
 
     // Proposal should be popped from schedule
@@ -163,7 +168,8 @@ async fn test_kv_get() {
     assert_eq!(chunks.len(), 2);
 
     // First: KVRead syscall (intermediate)
-    assert_eq!(chunks[0].status, ReceiptStatus::Normal);
+    assert_eq!(chunks[0].status, RuntimeStatus::Normal);
+    assert_eq!(chunks[0].returns, Vec::<u8>::new());
     assert_eq!(
         chunks[0].syscalls,
         vec![Syscall::KVRead {
@@ -173,14 +179,15 @@ async fn test_kv_get() {
     );
 
     // Second: return "" (empty kv_state cache)
-    assert_eq!(chunks[1].status, ReceiptStatus::End(mp("")));
+    assert_eq!(chunks[1].status, RuntimeStatus::End);
+    assert_eq!(chunks[1].returns, mp_data(""));
     assert_eq!(chunks[1].syscalls, vec![]);
 }
 
 // --- Test 3: Lua error ---
 
 #[tokio::test]
-async fn test_lua_error_skips_proposal() {
+async fn test_lua_error_satisfies() {
     let scheduler = SchedulerHandle::new(Box::new(InMemoryScheduler::new()));
     let state = StateHandle::new(InMemoryKVState::new());
 
@@ -188,6 +195,12 @@ async fn test_lua_error_skips_proposal() {
         namespace: "test".into(),
         app: "test".into(),
         proc: "errtest".into(),
+    };
+    let event = EventId {
+        namespace: "test".into(),
+        app: "test".into(),
+        proc: "errtest".into(),
+        seq: 0,
     };
 
     let executor = ExecutorHandle::new(
@@ -207,14 +220,15 @@ async fn test_lua_error_skips_proposal() {
         })
         .await;
 
-    // Error produces no Satisfy — proposal stays in schedule
-    // Poll to make sure it's still there (executor had time to process)
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let next = scheduler.get_next(process.clone()).await;
-    assert!(
-        next.is_some(),
-        "proposal was popped despite Lua error — should remain in schedule"
-    );
+    // Error produces a satisfy with RuntimeStatus::Error and proposal is popped
+    let chunks = wait_for_chunks(&scheduler, event, 1, Duration::from_secs(2)).await;
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].status, RuntimeStatus::Error);
+    assert!(String::from_utf8_lossy(&chunks[0].returns).contains("boom"));
+    assert_eq!(chunks[0].syscalls, vec![]);
+
+    // Proposal should be popped from schedule
+    assert!(scheduler.get_next(process.clone()).await.is_none());
 }
 
 // --- Test 4: Notify routes to target ---
@@ -334,21 +348,24 @@ async fn test_call_with_promise_resolution() {
     assert_eq!(chunks_a.len(), 2);
 
     // First chunk: Call syscall
-    assert_eq!(chunks_a[0].status, ReceiptStatus::Normal);
+    assert_eq!(chunks_a[0].status, RuntimeStatus::Normal);
+    assert_eq!(chunks_a[0].returns, Vec::<u8>::new());
     assert_eq!(chunks_a[0].syscalls.len(), 1);
     assert!(matches!(
         &chunks_a[0].syscalls[0],
         Syscall::Call { proposal } if proposal.process == proc_b
     ));
 
-    // Second chunk: End with B's return value
-    assert_eq!(chunks_a[1].status, ReceiptStatus::End(mp("pong")));
+    // Second chunk: End with B's return value (wrapped in { data = ... })
+    assert_eq!(chunks_a[1].status, RuntimeStatus::End);
+    assert_eq!(chunks_a[1].returns, mp_data("pong"));
     assert_eq!(chunks_a[1].syscalls, vec![]);
 
     // B should have 1 chunk: End("pong")
     let chunks_b = wait_for_chunks(&scheduler, event_b, 1, Duration::from_secs(2)).await;
     assert_eq!(chunks_b.len(), 1);
-    assert_eq!(chunks_b[0].status, ReceiptStatus::End(mp("pong")));
+    assert_eq!(chunks_b[0].status, RuntimeStatus::End);
+    assert_eq!(chunks_b[0].returns, mp_data("pong"));
     assert_eq!(chunks_b[0].syscalls, vec![]);
 }
 
@@ -408,22 +425,24 @@ async fn test_runtime_satisfy_resolves_promise() {
         .expect("runtime channel closed");
     assert_eq!(runtime_call.proposal.input, mp("https://example.com"));
 
-    // Runtime responds via runtime_satisfy
+    // Runtime responds via runtime_satisfy — must wrap in { data = ... }
     let response = format!("fetched: https://example.com");
-    let response_bytes = mp(&response);
+    let wrapped_response = msgpack_value(&serde_json::json!({"data": response}));
     scheduler
-        .runtime_satisfy(runtime_call.proposal, response_bytes.clone())
+        .runtime_satisfy(runtime_call.proposal, wrapped_response.clone())
         .await
         .unwrap();
 
     // Caller's promise should resolve: second chunk with the response
     let chunks = wait_for_chunks(&scheduler, caller_event, 2, Duration::from_secs(2)).await;
     assert_eq!(chunks.len(), 2);
-    assert_eq!(chunks[0].status, ReceiptStatus::Normal);
+    assert_eq!(chunks[0].status, RuntimeStatus::Normal);
+    assert_eq!(chunks[0].returns, Vec::<u8>::new());
     assert!(matches!(
         &chunks[0].syscalls[0],
         Syscall::Call { proposal } if proposal.process == runtime_proc
     ));
-    assert_eq!(chunks[1].status, ReceiptStatus::End(response_bytes));
+    assert_eq!(chunks[1].status, RuntimeStatus::End);
+    assert_eq!(chunks[1].returns, wrapped_response);
     assert_eq!(chunks[1].syscalls, vec![]);
 }

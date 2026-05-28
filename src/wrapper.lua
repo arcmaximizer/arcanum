@@ -14,7 +14,14 @@ function kv.set(key, value)
 end
 
 local function call(target, ...)
-    return syscall("call", target, ...)
+    local result = syscall("call", target, ...)
+    if type(result) == "table" and result.error ~= nil then
+        error(result.error)
+    end
+    if type(result) == "table" then
+        return result.data
+    end
+    return result
 end
 
 local function notify(target, ...)

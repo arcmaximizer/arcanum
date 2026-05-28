@@ -1,6 +1,6 @@
 use crate::{
     conversions::*,
-    scheduler::{self, Proposal, Receipt, SchedulerHandle, Syscall},
+    scheduler::{self, Proposal, Receipt, RuntimeStatus, SchedulerHandle, Syscall},
     state::StateHandle,
     types,
 };
@@ -218,6 +218,7 @@ pub async fn run_executor(
                         in_log_seq: log_seq,
                         syscalls: vec![syscall.clone()],
                         returns: Vec::new(),
+                        status: RuntimeStatus::Normal,
                     };
 
                     let completes_proposal = is_non_blocking(&syscall);
@@ -227,15 +228,10 @@ pub async fn run_executor(
                         completes_proposal
                     );
 
-                    let next_action = scheduler
+                    scheduler
                         .satisfy(proposal.clone(), receipt, completes_proposal)
                         .await
                         .unwrap();
-                    tracing::debug!(
-                        "Got next action: event={} proposal={:?}",
-                        next_action.event,
-                        next_action.proposal
-                    );
 
                     event_seqs.insert(event.clone(), in_event_seq + 1);
 
@@ -293,7 +289,9 @@ pub async fn run_executor(
                 }
                 Ok(return_value) => {
                     tracing::debug!("event={} Lua returned: {:#?}", event, return_value);
-                    let returns = mlua_value_to_bytes(&return_value);
+                    let mut map = serde_json::Map::new();
+                    map.insert("data".to_string(), mlua_to_json(&return_value));
+                    let returns = rmp_serde::to_vec(&serde_json::Value::Object(map)).unwrap_or_default();
                     if !returns.is_empty() {
                         tracing::debug!("event={} Serialized return bytes: {}", event, bytes_to_json_pretty(&returns));
                     }
@@ -305,6 +303,7 @@ pub async fn run_executor(
                         in_log_seq: log_seq,
                         syscalls: Vec::new(),
                         returns,
+                        status: RuntimeStatus::End,
                     };
 
                     scheduler
@@ -319,6 +318,25 @@ pub async fn run_executor(
                 }
                 Err(e) => {
                     tracing::error!("event={} Lua error: {}", event, e);
+
+                    let err_table = lua.create_table().unwrap();
+                    err_table.set("error", e.to_string()).unwrap();
+                    let returns = mlua_value_to_bytes(&mlua::Value::Table(err_table));
+
+                    let receipt = Receipt {
+                        proposal: proposal.clone(),
+                        in_event_seq,
+                        in_log_seq: log_seq,
+                        syscalls: Vec::new(),
+                        returns,
+                        status: RuntimeStatus::Error,
+                    };
+
+                    scheduler
+                        .satisfy(proposal.clone(), receipt, true)
+                        .await
+                        .unwrap();
+
                     tracing::debug!("event={} Lua error occurred, breaking loop", event);
                     threads.remove(&event);
                     break;
