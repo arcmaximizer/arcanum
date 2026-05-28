@@ -49,7 +49,7 @@ pub enum SchedulerMsg {
     Satisfy {
         proposal: Proposal,
         receipt: Receipt,
-        is_final: bool,
+        completes_proposal: bool,
         resp: tokio::sync::oneshot::Sender<Result<NextAction>>,
     },
     RuntimeSatisfy {
@@ -122,10 +122,10 @@ pub async fn run_scheduler(
             SchedulerMsg::Satisfy {
                 proposal,
                 receipt,
-                is_final,
+                completes_proposal,
                 resp,
             } => {
-                let result = scheduler.satisfy_proposal(&proposal, receipt, is_final);
+                let result = scheduler.satisfy_proposal(&proposal, receipt, completes_proposal);
                 if let Ok((_action, new_proposals)) = &result {
                     if !new_proposals.is_empty() {
                         tracing::debug!(
@@ -293,14 +293,14 @@ impl SchedulerHandle {
         &self,
         proposal: Proposal,
         receipt: Receipt,
-        is_final: bool,
+        completes_proposal: bool,
     ) -> Result<NextAction> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.sender
             .send(SchedulerMsg::Satisfy {
                 proposal,
                 receipt,
-                is_final,
+                completes_proposal,
                 resp: resp_tx,
             })
             .expect("Scheduler task has been killed");
@@ -380,7 +380,7 @@ pub trait Scheduler {
         &mut self,
         proposal: &Proposal,
         receipt: Receipt,
-        is_final: bool,
+        completes_proposal: bool,
     ) -> Result<(NextAction, Vec<Proposal>)>;
     fn get_chunks_from_event(&self, event: &EventId) -> Option<&Vec<Receipt>>;
     fn get_chunk_from_event(&self, event: &EventId, chunk_seq: u64) -> Option<&Receipt>;
@@ -448,7 +448,7 @@ impl Scheduler for InMemoryScheduler {
         &mut self,
         proposal: &Proposal,
         receipt: Receipt,
-        is_final: bool,
+        completes_proposal: bool,
     ) -> Result<(NextAction, Vec<Proposal>)> {
         // This should always validate data to ensure that any state transitions always follow some
         // invariants. Keep effects at the end in case of reverts and use transactions if possible.
@@ -530,7 +530,7 @@ impl Scheduler for InMemoryScheduler {
         let root_returns = root_chunk.returns.clone();
         let promise_target = promise.as_ref().map(|p| p.target.clone());
 
-        if is_final {
+        if completes_proposal {
             schedule.pop_front();
         }
 
@@ -561,7 +561,7 @@ impl Scheduler for InMemoryScheduler {
         }
 
         // Satisfy any existing promises
-        if is_final {
+        if completes_proposal {
             if let Some((source_event, source_process)) = source_chunk_data {
                 let promise_proposal = Proposal {
                     event: Some(source_event),

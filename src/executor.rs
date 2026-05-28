@@ -220,15 +220,15 @@ pub async fn run_executor(
                         returns: Vec::new(),
                     };
 
-                    let is_final_syscall = is_non_blocking(&syscall);
+                    let completes_proposal = is_non_blocking(&syscall);
                     tracing::debug!(
-                        "event={} Sending satisfy: is_final={}",
+                        "event={} Sending satisfy: completes_proposal={}",
                         event,
-                        is_final_syscall
+                        completes_proposal
                     );
 
                     let next_action = scheduler
-                        .satisfy(proposal.clone(), receipt, is_final_syscall)
+                        .satisfy(proposal.clone(), receipt, completes_proposal)
                         .await
                         .unwrap();
                     tracing::debug!(
