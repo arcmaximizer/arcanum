@@ -106,7 +106,7 @@ Chunks are essentially the same. Arcanum will not create a new chunk when an
 existing chunk is running.
 
 Storage operations are always considered to be part of the same chunk as well
-as any synchronous operations. However, any other async work such as network
+as any synchronous operations. TODO: EDIT THIS However, any other async work such as network
 I/O or message passing results in the current chunk ending, allowing other
 tasks to run.
 

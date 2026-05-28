@@ -9,8 +9,31 @@ local kv = {}
 function kv.get(key)
     return syscall("kv_get", key)
 end
+
 function kv.set(key, value)
     return syscall("kv_set", key, value)
+end
+
+local http = {}
+
+function http.get(target, ...)
+    return call("sys/http", "get", target, ...)
+end
+
+function http.post(target, ...)
+    return call("sys/http", "post", target, ...)
+end
+
+function http.put(target, ...)
+    return call("sys/http", "put", target, ...)
+end
+
+function http.delete(target, ...)
+    return call("sys/http", "delete", target, ...)
+end
+
+function http.request(target, verb, ...)
+    return call("sys/http", verb, target, ...)
 end
 
 local function call(target, ...)
@@ -26,6 +49,10 @@ end
 
 local function notify(target, ...)
     return syscall("notify", target, ...)
+end
+
+function spawn(template, name)
+    return syscall("spawn", template, name)
 end
 
 rawset(_G, "http", http)

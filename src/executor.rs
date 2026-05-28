@@ -18,11 +18,12 @@ fn extract_str(value: &mlua::Value, field: &str) -> String {
         .unwrap_or_default()
 }
 
-fn parse_syscall(
+async fn parse_syscall(
     value: &mlua::Value,
     event: &types::EventId,
     log_seq: u64,
-    kv_state: &HashMap<String, String>,
+    state: &StateHandle,
+    process: &types::ProcessId,
 ) -> Syscall {
     let sys_type = extract_str(value, "type");
     let args = value
@@ -31,11 +32,14 @@ fn parse_syscall(
 
     match sys_type.as_str() {
         "kv_get" => {
-            let key = args
+            let key: String = args
                 .as_ref()
                 .and_then(|a| a.get(1).ok())
                 .unwrap_or_default();
-            let current_value = kv_state.get(&key).cloned().unwrap_or_default();
+            let current_value = state
+                .get(process.clone(), key.clone())
+                .await
+                .unwrap_or_default();
             Syscall::KVRead { key, current_value }
         }
         "kv_set" => {
@@ -159,8 +163,6 @@ pub async fn run_executor(
 
     let mut event_seqs: HashMap<types::EventId, u64> = HashMap::new();
 
-    let mut kv_state: HashMap<String, String> = HashMap::new();
-
     while let Some(proposal) = work_rx.recv().await {
         if let Some(ref promise) = proposal.promise {
             tracing::debug!(
@@ -199,7 +201,11 @@ pub async fn run_executor(
             let log_seq = scheduler.get_log_seq(process.clone()).await;
             tracing::debug!("event={} Got log_seq={}", event, log_seq);
 
-            tracing::debug!("event={} Resuming Lua thread with input={:#?}", event, input);
+            tracing::debug!(
+                "event={} Resuming Lua thread with input={:#?}",
+                event,
+                input
+            );
             match thread.resume::<mlua::Value>(input.clone()) {
                 Ok(mlua::Value::Table(table)) if thread.status() == ThreadStatus::Resumable => {
                     tracing::debug!("event={} Got syscall from Lua", event);
@@ -208,8 +214,14 @@ pub async fn run_executor(
                         event,
                         mlua_to_json(&mlua::Value::Table(table.clone()))
                     );
-                    let syscall =
-                        parse_syscall(&mlua::Value::Table(table), &event, log_seq, &kv_state);
+                    let syscall = parse_syscall(
+                        &mlua::Value::Table(table),
+                        &event,
+                        log_seq,
+                        &state,
+                        &process,
+                    )
+                    .await;
                     tracing::debug!("event={} Parsed syscall: {:?}", event, syscall);
 
                     let receipt = Receipt {
@@ -238,7 +250,10 @@ pub async fn run_executor(
                     match syscall {
                         Syscall::KVRead { key, .. } => {
                             tracing::debug!("event={} KVRead: key={}", event, key);
-                            let value = kv_state.get(&key).cloned().unwrap_or_default();
+                            let value = state
+                                .get(process.clone(), key.clone())
+                                .await
+                                .unwrap_or_default();
                             tracing::debug!("event={} KVRead: value={}", event, value);
                             input = mlua::Value::String(lua.create_string(&value).unwrap());
                         }
@@ -252,7 +267,6 @@ pub async fn run_executor(
                             state
                                 .set(process.clone(), key.clone(), new_value.clone())
                                 .await;
-                            kv_state.insert(key, new_value);
                             tracing::debug!("event={} KVWrite: state updated", event);
                             input = mlua::Value::Nil;
                         }
@@ -291,9 +305,14 @@ pub async fn run_executor(
                     tracing::debug!("event={} Lua returned: {:#?}", event, return_value);
                     let mut map = serde_json::Map::new();
                     map.insert("data".to_string(), mlua_to_json(&return_value));
-                    let returns = rmp_serde::to_vec(&serde_json::Value::Object(map)).unwrap_or_default();
+                    let returns =
+                        rmp_serde::to_vec(&serde_json::Value::Object(map)).unwrap_or_default();
                     if !returns.is_empty() {
-                        tracing::debug!("event={} Serialized return bytes: {}", event, bytes_to_json_pretty(&returns));
+                        tracing::debug!(
+                            "event={} Serialized return bytes: {}",
+                            event,
+                            bytes_to_json_pretty(&returns)
+                        );
                     }
                     let in_event_seq = *event_seqs.entry(event.clone()).or_insert(0);
 

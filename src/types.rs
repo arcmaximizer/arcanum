@@ -41,18 +41,40 @@ impl TryFrom<&str> for ProcessId {
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         let stripped = s.strip_prefix('^').unwrap_or(s);
         let parts: Vec<&str> = stripped.splitn(3, '/').collect();
-        if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
-            return Err(ParseError {
+        match parts.len() {
+            3 => {
+                if parts.iter().any(|p| p.is_empty()) {
+                    return Err(ParseError {
+                        input: s.to_string(),
+                        reason: "ProcessId parts must not be empty".to_string(),
+                    });
+                }
+                Ok(ProcessId {
+                    namespace: parts[0].to_string(),
+                    app: parts[1].to_string(),
+                    proc: parts[2].to_string(),
+                })
+            }
+            2 => {
+                if parts[0].is_empty() || parts[1].is_empty() {
+                    return Err(ParseError {
+                        input: s.to_string(),
+                        reason: "ProcessId parts must not be empty".to_string(),
+                    });
+                }
+                Ok(ProcessId {
+                    namespace: parts[0].to_string(),
+                    app: parts[1].to_string(),
+                    proc: "entrypoint".to_string(),
+                })
+            }
+            _ => Err(ParseError {
                 input: s.to_string(),
-                reason: "ProcessId requires exactly two slashes (namespace/app/process)"
-                    .to_string(),
-            });
+                reason:
+                    "ProcessId requires two or three parts (namespace/app or namespace/app/process)"
+                        .to_string(),
+            }),
         }
-        Ok(ProcessId {
-            namespace: parts[0].to_string(),
-            app: parts[1].to_string(),
-            proc: parts[2].to_string(),
-        })
     }
 }
 

@@ -1,5 +1,6 @@
 mod conversions;
 mod executor;
+mod manager;
 mod proc;
 mod scheduler;
 mod state;

@@ -307,11 +307,7 @@ impl SchedulerHandle {
         resp_rx.await.expect("Scheduler task has been killed")
     }
 
-    pub async fn runtime_satisfy(
-        &self,
-        proposal: Proposal,
-        returns: Vec<u8>,
-    ) -> Result<()> {
+    pub async fn runtime_satisfy(&self, proposal: Proposal, returns: Vec<u8>) -> Result<()> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.sender
             .send(SchedulerMsg::RuntimeSatisfy {
