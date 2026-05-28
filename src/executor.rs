@@ -1,11 +1,11 @@
 use crate::{
-    scheduler::{self, Proposal, Receipt, SchedulerMsg, Syscall},
-    state::StateMsg,
+    scheduler::{self, Proposal, Receipt, SchedulerHandle, Syscall},
+    state::StateHandle,
     types,
 };
 use mlua::Lua;
 use std::collections::HashMap;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 use tracing;
 
 const WRAPPER_CODE: &str = r#"
@@ -166,11 +166,43 @@ fn is_non_blocking(syscall: &Syscall) -> bool {
     matches!(syscall, Syscall::Call { .. })
 }
 
+pub struct ExecutorHandle {
+    sender: mpsc::UnboundedSender<Proposal>,
+    process: types::ProcessId,
+}
+
+impl ExecutorHandle {
+    pub fn new(
+        process: types::ProcessId,
+        scheduler: SchedulerHandle,
+        state: StateHandle,
+        user_code: String,
+    ) -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(run_executor(
+            process.clone(),
+            receiver,
+            scheduler,
+            state,
+            user_code,
+        ));
+        Self { sender, process }
+    }
+
+    pub fn sender(&self) -> mpsc::UnboundedSender<Proposal> {
+        self.sender.clone()
+    }
+
+    pub fn process(&self) -> &types::ProcessId {
+        &self.process
+    }
+}
+
 pub async fn run_executor(
     process: types::ProcessId,
     mut work_rx: mpsc::UnboundedReceiver<Proposal>,
-    scheduler_tx: mpsc::UnboundedSender<SchedulerMsg>,
-    state_tx: mpsc::UnboundedSender<StateMsg>,
+    scheduler: SchedulerHandle,
+    state: StateHandle,
     user_code: String,
 ) {
     let lua = Lua::new();
@@ -204,14 +236,7 @@ pub async fn run_executor(
             e.clone()
         } else {
             tracing::debug!("No event ID provided, requesting from scheduler");
-            let (tx, rx) = oneshot::channel();
-            scheduler_tx
-                .send(SchedulerMsg::GetNextEventId {
-                    process: process.clone(),
-                    resp: tx,
-                })
-                .unwrap();
-            let e = rx.await.unwrap();
+            let e = scheduler.get_next_event_id(process.clone()).await;
             tracing::debug!("event={} Got event ID: seq={}", e, e.seq);
             e
         };
@@ -227,14 +252,7 @@ pub async fn run_executor(
             let in_event_seq = *event_seqs.entry(event.clone()).or_insert(0);
             tracing::debug!("Loop start: event={} in_event_seq={}", event, in_event_seq);
 
-            let (tx_log, rx_log) = oneshot::channel();
-            scheduler_tx
-                .send(SchedulerMsg::GetLogSeq {
-                    process: process.clone(),
-                    resp: tx_log,
-                })
-                .unwrap();
-            let log_seq = rx_log.await.unwrap();
+            let log_seq = scheduler.get_log_seq(process.clone()).await;
             tracing::debug!("event={} Got log_seq={}", event, log_seq);
 
             tracing::debug!("event={} Resuming Lua thread with input={:?}", event, input);
@@ -260,16 +278,10 @@ pub async fn run_executor(
                         is_final_syscall
                     );
 
-                    let (tx, rx) = oneshot::channel();
-                    scheduler_tx
-                        .send(SchedulerMsg::Satisfy {
-                            proposal: proposal.clone(),
-                            receipt,
-                            is_final: is_final_syscall,
-                            resp: tx,
-                        })
+                    let next_action = scheduler
+                        .satisfy(proposal.clone(), receipt, is_final_syscall)
+                        .await
                         .unwrap();
-                    let next_action = rx.await.unwrap().unwrap();
                     tracing::debug!(
                         "Got next action: event={} proposal={:?}",
                         next_action.event,
@@ -292,16 +304,9 @@ pub async fn run_executor(
                                 key,
                                 new_value
                             );
-                            let (tx, rx) = oneshot::channel();
-                            state_tx
-                                .send(StateMsg::Set {
-                                    process: process.clone(),
-                                    key: key.clone(),
-                                    value: new_value.clone(),
-                                    resp: tx,
-                                })
-                                .unwrap();
-                            rx.await.unwrap();
+                            state
+                                .set(process.clone(), key.clone(), new_value.clone())
+                                .await;
                             kv_state.insert(key, new_value);
                             tracing::debug!("event={} KVWrite: state updated", event);
                             input = mlua::Value::Nil;
@@ -332,13 +337,7 @@ pub async fn run_executor(
                                     proposal.input
                                 );
                             }
-                            let (tx, _rx) = oneshot::channel();
-                            scheduler_tx
-                                .send(SchedulerMsg::AddProposal {
-                                    proposal: proposal.clone(),
-                                    resp: tx,
-                                })
-                                .unwrap();
+                            scheduler.add_proposal(proposal.clone()).await;
                             break;
                         }
                     }
@@ -357,17 +356,11 @@ pub async fn run_executor(
                         returns,
                     };
 
-                    let (tx, rx) = oneshot::channel();
-                    scheduler_tx
-                        .send(SchedulerMsg::Satisfy {
-                            proposal: proposal.clone(),
-                            receipt,
-                            is_final: true,
-                            resp: tx,
-                        })
+                    scheduler
+                        .satisfy(proposal.clone(), receipt, true)
+                        .await
                         .unwrap();
                     tracing::debug!("event={} Sent final satisfy, awaiting response", event);
-                    rx.await.unwrap().unwrap();
                     tracing::debug!("event={} Final satisfy complete, breaking loop", event);
 
                     threads.remove(&event);
@@ -400,7 +393,8 @@ fn extract_return(value: &mlua::Value, lua: &Lua) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scheduler::{NextAction, Promise};
+    use crate::scheduler::{NextAction, Promise, SchedulerMsg};
+    use crate::state::StateMsg;
     use crate::types::{EventId, ProcessId};
     use anyhow::Result;
     use tokio::sync::{mpsc, oneshot};
@@ -425,11 +419,13 @@ mod tests {
                 proc: "p".to_string(),
             };
 
+            let scheduler = SchedulerHandle::from_sender(scheduler_tx);
+            let state = StateHandle::from_sender(state_tx);
             tokio::spawn(run_executor(
                 process.clone(),
                 work_rx,
-                scheduler_tx,
-                state_tx,
+                scheduler,
+                state,
                 lua_code,
             ));
 

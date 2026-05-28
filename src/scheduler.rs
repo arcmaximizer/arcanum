@@ -1,7 +1,7 @@
 use crate::types::{EventId, ProcessId};
 use anyhow::{Result, anyhow, bail};
 use std::collections::{HashMap, HashSet, VecDeque};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tracing;
 
 #[derive(Debug, Clone)]
@@ -182,6 +182,132 @@ pub async fn run_scheduler(
                 let _ = resp.send(result.map(|(action, _)| action));
             }
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct SchedulerHandle {
+    sender: mpsc::UnboundedSender<SchedulerMsg>,
+}
+
+impl SchedulerHandle {
+    pub fn new(scheduler: Box<dyn Scheduler + Send>) -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(run_scheduler(receiver, scheduler));
+        Self { sender }
+    }
+
+    pub fn from_sender(sender: mpsc::UnboundedSender<SchedulerMsg>) -> Self {
+        Self { sender }
+    }
+
+    pub async fn add_proposal(&self, proposal: Proposal) -> u64 {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(SchedulerMsg::AddProposal {
+                proposal,
+                resp: resp_tx,
+            })
+            .expect("Scheduler task has been killed");
+        resp_rx.await.expect("Scheduler task has been killed")
+    }
+
+    pub fn register_executor(&self, process: ProcessId, tx: mpsc::UnboundedSender<Proposal>) {
+        self.sender
+            .send(SchedulerMsg::RegisterExecutor { process, tx })
+            .expect("Scheduler task has been killed");
+    }
+
+    pub fn unregister_executor(&self, process: ProcessId) {
+        self.sender
+            .send(SchedulerMsg::UnregisterExecutor { process })
+            .expect("Scheduler task has been killed");
+    }
+
+    pub fn register_runtime(&self, process: ProcessId, tx: mpsc::UnboundedSender<RuntimeCall>) {
+        self.sender
+            .send(SchedulerMsg::RegisterRuntime { process, tx })
+            .expect("Scheduler task has been killed");
+    }
+
+    pub fn unregister_runtime(&self, process: ProcessId) {
+        self.sender
+            .send(SchedulerMsg::UnregisterRuntime { process })
+            .expect("Scheduler task has been killed");
+    }
+
+    pub async fn get_next(&self, process: ProcessId) -> Option<Proposal> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(SchedulerMsg::GetNext {
+                process,
+                resp: resp_tx,
+            })
+            .expect("Scheduler task has been killed");
+        resp_rx.await.expect("Scheduler task has been killed")
+    }
+
+    pub async fn get_chunks(&self, event: EventId) -> Option<Vec<Receipt>> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(SchedulerMsg::GetChunks {
+                event,
+                resp: resp_tx,
+            })
+            .expect("Scheduler task has been killed");
+        resp_rx.await.expect("Scheduler task has been killed")
+    }
+
+    pub async fn get_next_event_id(&self, process: ProcessId) -> EventId {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(SchedulerMsg::GetNextEventId {
+                process,
+                resp: resp_tx,
+            })
+            .expect("Scheduler task has been killed");
+        resp_rx.await.expect("Scheduler task has been killed")
+    }
+
+    pub async fn get_log_seq(&self, process: ProcessId) -> u64 {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(SchedulerMsg::GetLogSeq {
+                process,
+                resp: resp_tx,
+            })
+            .expect("Scheduler task has been killed");
+        resp_rx.await.expect("Scheduler task has been killed")
+    }
+
+    pub async fn satisfy(
+        &self,
+        proposal: Proposal,
+        receipt: Receipt,
+        is_final: bool,
+    ) -> Result<NextAction> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(SchedulerMsg::Satisfy {
+                proposal,
+                receipt,
+                is_final,
+                resp: resp_tx,
+            })
+            .expect("Scheduler task has been killed");
+        resp_rx.await.expect("Scheduler task has been killed")
+    }
+
+    pub async fn runtime_satisfy(&self, proposal: Proposal, returns: String) -> Result<NextAction> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(SchedulerMsg::RuntimeSatisfy {
+                proposal,
+                returns,
+                resp: resp_tx,
+            })
+            .expect("Scheduler task has been killed");
+        resp_rx.await.expect("Scheduler task has been killed")
     }
 }
 

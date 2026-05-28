@@ -4,29 +4,23 @@ mod state;
 mod store;
 mod types;
 
-use scheduler::{InMemoryScheduler, Proposal, RuntimeCall, SchedulerMsg};
-use state::{InMemoryKVState, StateMsg};
+use executor::ExecutorHandle;
+use scheduler::{InMemoryScheduler, Proposal, RuntimeCall, SchedulerHandle};
+use state::{InMemoryKVState, StateHandle};
 use tokio::sync::mpsc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use types::ProcessId;
 
 async fn run_http_process(
     mut rx: mpsc::UnboundedReceiver<RuntimeCall>,
-    scheduler_tx: mpsc::UnboundedSender<SchedulerMsg>,
+    scheduler: SchedulerHandle,
 ) {
     while let Some(call) = rx.recv().await {
         tracing::debug!("HTTP process: got request for {}", call.proposal.input);
 
         let response = format!("fetched: {}", call.proposal.input);
 
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        scheduler_tx
-            .send(SchedulerMsg::RuntimeSatisfy {
-                proposal: call.proposal,
-                returns: response,
-                resp: tx,
-            })
-            .unwrap();
+        let _ = scheduler.runtime_satisfy(call.proposal, response).await;
     }
 }
 
@@ -37,14 +31,8 @@ async fn main() {
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel::<SchedulerMsg>();
-    let (state_tx, state_rx) = mpsc::unbounded_channel::<StateMsg>();
-
-    let sch_data = Box::new(InMemoryScheduler::new());
-    tokio::spawn(scheduler::run_scheduler(scheduler_rx, sch_data));
-
-    let state_data = InMemoryKVState::new();
-    tokio::spawn(state::run_state(state_rx, state_data));
+    let scheduler = SchedulerHandle::new(Box::new(InMemoryScheduler::new()));
+    let state = StateHandle::new(InMemoryKVState::new());
 
     // Create echo process
     let echo_process = ProcessId {
@@ -52,26 +40,18 @@ async fn main() {
         app: "echo".to_string(),
         proc: "entrypoint".to_string(),
     };
-    let (echo_tx, echo_rx) = mpsc::unbounded_channel::<Proposal>();
 
-    // Register echo executor with scheduler
-    scheduler_tx
-        .send(SchedulerMsg::RegisterExecutor {
-            process: echo_process.clone(),
-            tx: echo_tx.clone(),
-        })
-        .unwrap();
-
-    tokio::spawn(executor::run_executor(
+    let echo = ExecutorHandle::new(
         echo_process.clone(),
-        echo_rx,
-        scheduler_tx.clone(),
-        state_tx.clone(),
+        scheduler.clone(),
+        state.clone(),
         r#"return function(value)
             return value
         end"#
             .to_string(),
-    ));
+    );
+
+    scheduler.register_executor(echo_process.clone(), echo.sender());
 
     // Create hello process
     let hello_process = ProcessId {
@@ -79,25 +59,18 @@ async fn main() {
         app: "hello".to_string(),
         proc: "entrypoint".to_string(),
     };
-    let (hello_tx, hello_rx) = mpsc::unbounded_channel::<Proposal>();
 
-    scheduler_tx
-        .send(SchedulerMsg::RegisterExecutor {
-            process: hello_process.clone(),
-            tx: hello_tx.clone(),
-        })
-        .unwrap();
-
-    tokio::spawn(executor::run_executor(
+    let hello = ExecutorHandle::new(
         hello_process.clone(),
-        hello_rx,
-        scheduler_tx.clone(),
-        state_tx.clone(),
+        scheduler.clone(),
+        state.clone(),
         r#"return function(value)
             return call("^arc/echo/entrypoint", "Hello world!")
         end"#
             .to_string(),
-    ));
+    );
+
+    scheduler.register_executor(hello_process.clone(), hello.sender());
 
     // Register sys/http as a runtime process
     let http_process = ProcessId {
@@ -107,40 +80,29 @@ async fn main() {
     };
     let (http_tx, http_rx) = mpsc::unbounded_channel::<RuntimeCall>();
 
-    scheduler_tx
-        .send(SchedulerMsg::RegisterRuntime {
-            process: http_process.clone(),
-            tx: http_tx,
-        })
-        .unwrap();
+    scheduler.register_runtime(http_process.clone(), http_tx);
 
-    tokio::spawn(run_http_process(http_rx, scheduler_tx.clone()));
+    tokio::spawn(run_http_process(http_rx, scheduler.clone()));
 
     // Submit initial proposals via scheduler
 
-    scheduler_tx
-        .send(SchedulerMsg::AddProposal {
-            proposal: Proposal {
-                process: hello_process.clone(),
-                event: None,
-                input: "start".to_string(),
-                promise: None,
-            },
-            resp: tokio::sync::oneshot::channel().0,
+    scheduler
+        .add_proposal(Proposal {
+            process: hello_process.clone(),
+            event: None,
+            input: "start".to_string(),
+            promise: None,
         })
-        .unwrap();
+        .await;
 
-    scheduler_tx
-        .send(SchedulerMsg::AddProposal {
-            proposal: Proposal {
-                process: hello_process.clone(),
-                event: None,
-                input: "start".to_string(),
-                promise: None,
-            },
-            resp: tokio::sync::oneshot::channel().0,
+    scheduler
+        .add_proposal(Proposal {
+            process: hello_process.clone(),
+            event: None,
+            input: "start".to_string(),
+            promise: None,
         })
-        .unwrap();
+        .await;
 
     // Keep running
     tokio::signal::ctrl_c().await.unwrap();

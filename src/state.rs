@@ -1,6 +1,6 @@
 use crate::types::ProcessId;
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug)]
 pub enum StateMsg {
@@ -15,6 +15,48 @@ pub enum StateMsg {
         key: String,
         resp: tokio::sync::oneshot::Sender<Option<String>>,
     },
+}
+
+#[derive(Clone)]
+pub struct StateHandle {
+    sender: mpsc::UnboundedSender<StateMsg>,
+}
+
+impl StateHandle {
+    pub fn new(state: InMemoryKVState) -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(run_state(receiver, state));
+        Self { sender }
+    }
+
+    pub fn from_sender(sender: mpsc::UnboundedSender<StateMsg>) -> Self {
+        Self { sender }
+    }
+
+    pub async fn set(&self, process: ProcessId, key: String, value: String) {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(StateMsg::Set {
+                process,
+                key,
+                value,
+                resp: resp_tx,
+            })
+            .expect("State task has been killed");
+        resp_rx.await.expect("State task has been killed");
+    }
+
+    pub async fn get(&self, process: ProcessId, key: String) -> Option<String> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(StateMsg::Get {
+                process,
+                key,
+                resp: resp_tx,
+            })
+            .expect("State task has been killed");
+        resp_rx.await.expect("State task has been killed")
+    }
 }
 
 pub async fn run_state(mut rx: mpsc::UnboundedReceiver<StateMsg>, mut state: InMemoryKVState) {

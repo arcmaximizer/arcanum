@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use tar::Archive;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 pub type HashKey = [u8; 32];
 
@@ -38,6 +38,83 @@ pub enum StoreMsg {
         asset: String,
         resp: tokio::sync::oneshot::Sender<Option<Bytes>>,
     },
+}
+
+#[derive(Clone)]
+pub struct StoreHandle {
+    sender: mpsc::UnboundedSender<StoreMsg>,
+}
+
+impl StoreHandle {
+    pub fn new(store: Box<dyn PackageStore + Send>) -> Self {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(run_store(receiver, store));
+        Self { sender }
+    }
+
+    pub fn from_sender(sender: mpsc::UnboundedSender<StoreMsg>) -> Self {
+        Self { sender }
+    }
+
+    pub async fn resolve_name(&self, name: String) -> Option<HashKey> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(StoreMsg::ResolveName {
+                name,
+                resp: resp_tx,
+            })
+            .expect("Store task has been killed");
+        resp_rx.await.expect("Store task has been killed")
+    }
+
+    pub fn set_name(&self, name: String, key: HashKey) {
+        self.sender
+            .send(StoreMsg::SetName { name, key })
+            .expect("Store task has been killed");
+    }
+
+    pub async fn get_package(&self, key: HashKey) -> Option<Bytes> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(StoreMsg::GetPackage { key, resp: resp_tx })
+            .expect("Store task has been killed");
+        resp_rx.await.expect("Store task has been killed")
+    }
+
+    pub async fn add_package(&self, value: Bytes) -> Result<HashKey> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(StoreMsg::AddPackage {
+                value,
+                resp: resp_tx,
+            })
+            .expect("Store task has been killed");
+        resp_rx.await.expect("Store task has been killed")
+    }
+
+    pub async fn get_asset(&self, key: HashKey, asset: String) -> Option<Bytes> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(StoreMsg::GetAsset {
+                key,
+                asset,
+                resp: resp_tx,
+            })
+            .expect("Store task has been killed");
+        resp_rx.await.expect("Store task has been killed")
+    }
+
+    pub async fn get_asset_by_name(&self, name: String, asset: String) -> Option<Bytes> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(StoreMsg::GetAssetByName {
+                name,
+                asset,
+                resp: resp_tx,
+            })
+            .expect("Store task has been killed");
+        resp_rx.await.expect("Store task has been killed")
+    }
 }
 
 pub async fn run_store(
