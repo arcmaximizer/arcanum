@@ -78,6 +78,11 @@ pub fn json_to_mlua(lua: &Lua, value: &JsonValue) -> mlua::Result<mlua::Value> {
     }
 }
 
+pub fn bytes_to_json_pretty(bytes: &[u8]) -> String {
+    let value: JsonValue = rmp_serde::from_slice(bytes).unwrap_or(JsonValue::Null);
+    serde_json::to_string_pretty(&value).unwrap_or_else(|_| format!("{bytes:?}"))
+}
+
 pub fn mlua_value_to_bytes(value: &mlua::Value) -> Vec<u8> {
     let json = mlua_to_json(value);
     rmp_serde::to_vec(&json).unwrap_or_default()

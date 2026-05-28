@@ -5,7 +5,6 @@ use crate::{
     types,
 };
 use mlua::{Lua, ThreadStatus};
-use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing;
@@ -24,7 +23,6 @@ fn parse_syscall(
     event: &types::EventId,
     log_seq: u64,
     kv_state: &HashMap<String, String>,
-    lua: &Lua,
 ) -> Syscall {
     let sys_type = extract_str(value, "type");
     let args = value
@@ -166,16 +164,16 @@ pub async fn run_executor(
     while let Some(proposal) = work_rx.recv().await {
         if let Some(ref promise) = proposal.promise {
             tracing::debug!(
-                "Received proposal: process={} {} input={:?}",
+                "Received proposal: process={} {} input={}",
                 proposal.process,
                 promise,
-                proposal.input,
+                bytes_to_json_pretty(&proposal.input),
             );
         } else {
             tracing::debug!(
-                "Received proposal: process={} input={:?}",
+                "Received proposal: process={} input={}",
                 proposal.process,
-                proposal.input,
+                bytes_to_json_pretty(&proposal.input),
             );
         }
         let event = if let Some(ref e) = proposal.event {
@@ -201,7 +199,7 @@ pub async fn run_executor(
             let log_seq = scheduler.get_log_seq(process.clone()).await;
             tracing::debug!("event={} Got log_seq={}", event, log_seq);
 
-            tracing::debug!("event={} Resuming Lua thread with input={:?}", event, input);
+            tracing::debug!("event={} Resuming Lua thread with input={:#?}", event, input);
             match thread.resume::<mlua::Value>(input.clone()) {
                 Ok(mlua::Value::Table(table)) if thread.status() == ThreadStatus::Resumable => {
                     tracing::debug!("event={} Got syscall from Lua", event);
@@ -211,7 +209,7 @@ pub async fn run_executor(
                         mlua_to_json(&mlua::Value::Table(table.clone()))
                     );
                     let syscall =
-                        parse_syscall(&mlua::Value::Table(table), &event, log_seq, &kv_state, &lua);
+                        parse_syscall(&mlua::Value::Table(table), &event, log_seq, &kv_state);
                     tracing::debug!("event={} Parsed syscall: {:?}", event, syscall);
 
                     let receipt = Receipt {
@@ -264,28 +262,28 @@ pub async fn run_executor(
                         }
                         Syscall::Notify { proposal, .. } => {
                             tracing::debug!(
-                                "event={} Notify: target={} input={:?}",
+                                "event={} Notify: target={} input={}",
                                 event,
                                 proposal.process,
-                                proposal.input
+                                bytes_to_json_pretty(&proposal.input)
                             );
                             input = mlua::Value::Nil;
                         }
                         Syscall::Call { proposal, .. } => {
                             if let Some(ref promise) = proposal.promise {
                                 tracing::debug!(
-                                    "event={} Call: target={} {} input={:?}",
+                                    "event={} Call: target={} {} input={}",
                                     event,
                                     proposal.process,
                                     promise,
-                                    proposal.input
+                                    bytes_to_json_pretty(&proposal.input)
                                 );
                             } else {
                                 tracing::debug!(
-                                    "event={} Call: target={} input={:?}",
+                                    "event={} Call: target={} input={}",
                                     event,
                                     proposal.process,
-                                    proposal.input
+                                    bytes_to_json_pretty(&proposal.input)
                                 );
                             }
                             scheduler.add_proposal(proposal.clone()).await;
@@ -294,9 +292,11 @@ pub async fn run_executor(
                     }
                 }
                 Ok(return_value) => {
-                    tracing::debug!("event={} Lua returned: {:?}", event, return_value);
+                    tracing::debug!("event={} Lua returned: {:#?}", event, return_value);
                     let returns = mlua_value_to_bytes(&return_value);
-                    tracing::debug!("event={} Serialized return bytes: {:?}", event, returns);
+                    if !returns.is_empty() {
+                        tracing::debug!("event={} Serialized return bytes: {}", event, bytes_to_json_pretty(&returns));
+                    }
                     let in_event_seq = *event_seqs.entry(event.clone()).or_insert(0);
 
                     let receipt = Receipt {

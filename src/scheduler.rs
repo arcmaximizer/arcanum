@@ -1,3 +1,4 @@
+use crate::conversions::bytes_to_json_pretty;
 use crate::types::{EventId, ProcessId};
 use anyhow::{Result, anyhow, bail};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -134,13 +135,17 @@ pub async fn run_scheduler(
                         for p in new_proposals {
                             if let Some(ref promise) = p.promise {
                                 tracing::debug!(
-                                    "  -> process={} {} input={:?}",
+                                    "  -> process={} {} input={}",
                                     p.process,
                                     promise,
-                                    p.input
+                                    bytes_to_json_pretty(&p.input)
                                 );
                             } else {
-                                tracing::debug!("  -> process={} input={:?}", p.process, p.input);
+                                tracing::debug!(
+                                    "  -> process={} input={}",
+                                    p.process,
+                                    bytes_to_json_pretty(&p.input)
+                                );
                             }
                         }
                     }
@@ -165,13 +170,17 @@ pub async fn run_scheduler(
                         for p in new_proposals {
                             if let Some(ref promise) = p.promise {
                                 tracing::debug!(
-                                    "  -> process={} {} input={:?}",
+                                    "  -> process={} {} input={}",
                                     p.process,
                                     promise,
-                                    p.input
+                                    bytes_to_json_pretty(&p.input)
                                 );
                             } else {
-                                tracing::debug!("  -> process={} input={:?}", p.process, p.input);
+                                tracing::debug!(
+                                    "  -> process={} input={}",
+                                    p.process,
+                                    bytes_to_json_pretty(&p.input)
+                                );
                             }
                         }
                     }
