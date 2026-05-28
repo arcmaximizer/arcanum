@@ -1,28 +1,16 @@
 mod executor;
+mod proc;
 mod scheduler;
 mod state;
 mod store;
 mod types;
 
 use executor::ExecutorHandle;
-use scheduler::{InMemoryScheduler, Proposal, RuntimeCall, SchedulerHandle};
+use proc::http::HttpHandle;
+use scheduler::{InMemoryScheduler, Proposal, SchedulerHandle};
 use state::{InMemoryKVState, StateHandle};
-use tokio::sync::mpsc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use types::ProcessId;
-
-async fn run_http_process(
-    mut rx: mpsc::UnboundedReceiver<RuntimeCall>,
-    scheduler: SchedulerHandle,
-) {
-    while let Some(call) = rx.recv().await {
-        tracing::debug!("HTTP process: got request for {}", call.proposal.input);
-
-        let response = format!("fetched: {}", call.proposal.input);
-
-        let _ = scheduler.runtime_satisfy(call.proposal, response).await;
-    }
-}
 
 #[tokio::main]
 async fn main() {
@@ -78,11 +66,9 @@ async fn main() {
         app: "http".to_string(),
         proc: "runtime".to_string(),
     };
-    let (http_tx, http_rx) = mpsc::unbounded_channel::<RuntimeCall>();
 
-    scheduler.register_runtime(http_process.clone(), http_tx);
-
-    tokio::spawn(run_http_process(http_rx, scheduler.clone()));
+    let http = HttpHandle::new(scheduler.clone());
+    scheduler.register_runtime(http_process.clone(), http.sender());
 
     // Submit initial proposals via scheduler
 
