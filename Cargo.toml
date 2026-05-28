@@ -24,5 +24,6 @@ mlua = { version = "0.11.6", features = ["luau", "serde", "anyhow", "async", "se
 async-stream = "0.3.6"
 futures = "0.3.32"
 tokio-stream = "0.1.18"
+rmp-serde = "1.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

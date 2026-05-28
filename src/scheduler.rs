@@ -53,7 +53,7 @@ pub enum SchedulerMsg {
     },
     RuntimeSatisfy {
         proposal: Proposal,
-        returns: String,
+        returns: Vec<u8>,
         resp: tokio::sync::oneshot::Sender<Result<NextAction>>,
     },
 }
@@ -134,13 +134,13 @@ pub async fn run_scheduler(
                         for p in new_proposals {
                             if let Some(ref promise) = p.promise {
                                 tracing::debug!(
-                                    "  -> process={} {} input={}",
+                                    "  -> process={} {} input={:?}",
                                     p.process,
                                     promise,
                                     p.input
                                 );
                             } else {
-                                tracing::debug!("  -> process={} input={}", p.process, p.input);
+                                tracing::debug!("  -> process={} input={:?}", p.process, p.input);
                             }
                         }
                     }
@@ -165,13 +165,13 @@ pub async fn run_scheduler(
                         for p in new_proposals {
                             if let Some(ref promise) = p.promise {
                                 tracing::debug!(
-                                    "  -> process={} {} input={}",
+                                    "  -> process={} {} input={:?}",
                                     p.process,
                                     promise,
                                     p.input
                                 );
                             } else {
-                                tracing::debug!("  -> process={} input={}", p.process, p.input);
+                                tracing::debug!("  -> process={} input={:?}", p.process, p.input);
                             }
                         }
                     }
@@ -298,7 +298,7 @@ impl SchedulerHandle {
         resp_rx.await.expect("Scheduler task has been killed")
     }
 
-    pub async fn runtime_satisfy(&self, proposal: Proposal, returns: String) -> Result<NextAction> {
+    pub async fn runtime_satisfy(&self, proposal: Proposal, returns: Vec<u8>) -> Result<NextAction> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.sender
             .send(SchedulerMsg::RuntimeSatisfy {
@@ -321,7 +321,7 @@ pub struct Receipt {
     /// e.g. ^arc/my-app/my-process/c48
     pub in_log_seq: u64,
     pub syscalls: Vec<Syscall>,
-    pub returns: String,
+    pub returns: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -336,7 +336,7 @@ pub enum Syscall {
 pub struct Proposal {
     pub process: ProcessId,
     pub event: Option<EventId>,
-    pub input: String,
+    pub input: Vec<u8>,
     pub promise: Option<Promise>,
 }
 
@@ -377,7 +377,7 @@ pub trait Scheduler {
     fn runtime_satisfy(
         &mut self,
         proposal: &Proposal,
-        returns: String,
+        returns: Vec<u8>,
     ) -> Result<(NextAction, Vec<Proposal>)>;
 }
 
@@ -386,7 +386,7 @@ pub struct InMemoryScheduler {
     pub process_chunks: HashMap<ProcessId, Vec<Receipt>>,
     pub schedule: HashMap<ProcessId, VecDeque<Proposal>>,
     pub event_counter: HashMap<ProcessId, u64>,
-    pub proposal_counter: u64,
+    // pub proposal_counter: u64,
     pub runtime_processes: HashSet<ProcessId>,
 }
 
@@ -397,7 +397,7 @@ impl InMemoryScheduler {
             process_chunks: HashMap::new(),
             schedule: HashMap::new(),
             event_counter: HashMap::new(),
-            proposal_counter: 0,
+            // proposal_counter: 0,
             runtime_processes: HashSet::new(),
         }
     }
@@ -590,7 +590,7 @@ impl Scheduler for InMemoryScheduler {
     fn runtime_satisfy(
         &mut self,
         proposal: &Proposal,
-        returns: String,
+        returns: Vec<u8>,
     ) -> Result<(NextAction, Vec<Proposal>)> {
         let process = &proposal.process;
 
@@ -653,6 +653,10 @@ impl Scheduler for InMemoryScheduler {
 mod tests {
     use super::*;
 
+    fn mp(s: &str) -> Vec<u8> {
+        rmp_serde::to_vec(&serde_json::Value::String(s.into())).unwrap()
+    }
+
     fn proc(id: &str) -> ProcessId {
         ProcessId {
             namespace: "test".to_string(),
@@ -674,7 +678,7 @@ mod tests {
         Proposal {
             process: proc("worker"),
             event: None,
-            input: input.to_string(),
+            input: mp(input),
             promise: None,
         }
     }
@@ -691,7 +695,7 @@ mod tests {
             in_event_seq,
             in_log_seq,
             syscalls,
-            returns: returns.to_string(),
+            returns: mp(returns),
         }
     }
 
@@ -714,7 +718,7 @@ mod tests {
             proposal: Proposal {
                 process: target.clone(),
                 event: None,
-                input: input.to_string(),
+                input: mp(input),
                 promise: Some(Promise {
                     id: log_seq,
                     target: event.clone(),
@@ -728,7 +732,7 @@ mod tests {
             proposal: Proposal {
                 process: target.clone(),
                 event: None,
-                input: input.to_string(),
+                input: mp(input),
                 promise: None,
             },
         }
@@ -788,7 +792,7 @@ mod tests {
 
         assert_eq!(
             s.get_next_proposal(&proc("worker")).unwrap().input,
-            "second"
+            mp("second")
         );
     }
 
@@ -954,7 +958,7 @@ mod tests {
         let ev = event(&proc("worker"), 0);
         let chunks = s.get_chunks_from_event(&ev).unwrap();
         assert_eq!(chunks.len(), 3);
-        assert_eq!(chunks[2].returns, "done");
+        assert_eq!(chunks[2].returns, mp("done"));
     }
 
     #[test]
@@ -1001,7 +1005,7 @@ mod tests {
         let rec = receipt(&p, 0, 0, vec![notify(&target, "fire!")], "");
         s.satisfy_proposal(&p, rec, true).unwrap();
 
-        assert_eq!(s.get_next_proposal(&target).unwrap().input, "fire!");
+        assert_eq!(s.get_next_proposal(&target).unwrap().input, mp("fire!"));
     }
 
     // --- Promise resolution ---
@@ -1017,7 +1021,7 @@ mod tests {
         let p_a = Proposal {
             process: proc_a.clone(),
             event: None,
-            input: "call_b".to_string(),
+            input: mp("call_b"),
             promise: None,
         };
         s.add_proposal(p_a.clone());
@@ -1041,7 +1045,7 @@ mod tests {
 
         // Promise resolution: A should have a new proposal with "reply"
         let a_next = s.get_next_proposal(&proc_a).unwrap();
-        assert_eq!(a_next.input, "reply");
+        assert_eq!(a_next.input, mp("reply"));
         assert_eq!(a_next.event, Some(ev_a.clone()));
         assert!(a_next.promise.is_none());
     }
@@ -1093,7 +1097,7 @@ mod tests {
 
         let chunks = s.get_chunks_from_event(&event(&proc("worker"), 0)).unwrap();
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].returns, "ok");
+        assert_eq!(chunks[0].returns, mp("ok"));
     }
 
     // --- get_chunk_from_event ---
@@ -1112,8 +1116,8 @@ mod tests {
             .unwrap();
 
         let ev = event(&proc("worker"), 0);
-        assert_eq!(s.get_chunk_from_event(&ev, 0).unwrap().returns, "first");
-        assert_eq!(s.get_chunk_from_event(&ev, 1).unwrap().returns, "second");
+        assert_eq!(s.get_chunk_from_event(&ev, 0).unwrap().returns, mp("first"));
+        assert_eq!(s.get_chunk_from_event(&ev, 1).unwrap().returns, mp("second"));
         assert_eq!(s.get_chunk_from_event(&ev, 2), None);
     }
 
@@ -1152,7 +1156,7 @@ mod tests {
         let p_caller = Proposal {
             process: caller.clone(),
             event: None,
-            input: "start".to_string(),
+            input: mp("start"),
             promise: None,
         };
         s.add_proposal(p_caller.clone());
@@ -1169,7 +1173,7 @@ mod tests {
         // The call proposal should be returned as the next action
         let p_http = action.proposal.unwrap();
         assert_eq!(p_http.process, http_process);
-        assert_eq!(p_http.input, "https://example.com");
+        assert_eq!(p_http.input, mp("https://example.com"));
         assert!(p_http.promise.is_some());
 
         // Add the runtime proposal to the http schedule
@@ -1177,7 +1181,7 @@ mod tests {
 
         // Now satisfy the runtime call — no receipts, just the return value
         let (action, new_proposals) = s
-            .runtime_satisfy(&p_http, "response body".to_string())
+            .runtime_satisfy(&p_http, mp("response body"))
             .unwrap();
 
         assert_eq!(action.event.namespace, "test");
@@ -1189,13 +1193,13 @@ mod tests {
         assert_eq!(new_proposals.len(), 1);
         let resolved = &new_proposals[0];
         assert_eq!(resolved.process, caller);
-        assert_eq!(resolved.input, "response body");
+        assert_eq!(resolved.input, mp("response body"));
         assert_eq!(resolved.event, Some(ev));
         assert!(resolved.promise.is_none());
 
         // The resolved proposal should be in the caller's schedule
         let caller_next = s.get_next_proposal(&caller).unwrap();
-        assert_eq!(caller_next.input, "response body");
+        assert_eq!(caller_next.input, mp("response body"));
     }
 
     #[test]
@@ -1206,24 +1210,24 @@ mod tests {
         let p1 = Proposal {
             process: http_process.clone(),
             event: None,
-            input: "first".to_string(),
+            input: mp("first"),
             promise: None,
         };
         let p2 = Proposal {
             process: http_process.clone(),
             event: None,
-            input: "second".to_string(),
+            input: mp("second"),
             promise: None,
         };
 
         s.add_proposal(p1.clone());
         s.add_proposal(p2.clone());
 
-        s.runtime_satisfy(&p1, "ok".to_string()).unwrap();
+        s.runtime_satisfy(&p1, mp("ok")).unwrap();
 
         // p1 should be popped, p2 should be next
         let next = s.get_next_proposal(&http_process).unwrap();
-        assert_eq!(next.input, "second");
+        assert_eq!(next.input, mp("second"));
     }
 
     // --- runtime_satisfy: error cases ---
@@ -1234,10 +1238,10 @@ mod tests {
         let p = Proposal {
             process: proc("http"),
             event: None,
-            input: "url".to_string(),
+            input: mp("url"),
             promise: None,
         };
-        let err = s.runtime_satisfy(&p, "ok".to_string()).unwrap_err();
+        let err = s.runtime_satisfy(&p, mp("ok")).unwrap_err();
         assert!(err.to_string().contains("No schedule exists"));
     }
 
@@ -1248,7 +1252,7 @@ mod tests {
         s.add_proposal(Proposal {
             process: http_process.clone(),
             event: None,
-            input: "first".to_string(),
+            input: mp("first"),
             promise: None,
         });
         // Pop it to empty the schedule
@@ -1257,10 +1261,10 @@ mod tests {
         let p = Proposal {
             process: http_process,
             event: None,
-            input: "url".to_string(),
+            input: mp("url"),
             promise: None,
         };
-        let err = s.runtime_satisfy(&p, "ok".to_string()).unwrap_err();
+        let err = s.runtime_satisfy(&p, mp("ok")).unwrap_err();
         assert!(err.to_string().contains("No proposals exist in schedule"));
     }
 
@@ -1272,13 +1276,13 @@ mod tests {
         let p1 = Proposal {
             process: http_process.clone(),
             event: None,
-            input: "first".to_string(),
+            input: mp("first"),
             promise: None,
         };
         let p2 = Proposal {
             process: http_process.clone(),
             event: None,
-            input: "second".to_string(),
+            input: mp("second"),
             promise: None,
         };
 
@@ -1286,7 +1290,7 @@ mod tests {
         s.add_proposal(p2.clone());
 
         // Try to satisfy p2 while p1 is still first in queue
-        let err = s.runtime_satisfy(&p2, "ok".to_string()).unwrap_err();
+        let err = s.runtime_satisfy(&p2, mp("ok")).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Proposal does not match first scheduled proposal")
@@ -1307,7 +1311,7 @@ mod tests {
         let p_caller = Proposal {
             process: caller.clone(),
             event: None,
-            input: "start".to_string(),
+            input: mp("start"),
             promise: None,
         };
         s.add_proposal(p_caller.clone());
@@ -1323,7 +1327,7 @@ mod tests {
 
         let p_http = action.proposal.unwrap();
         s.add_proposal(p_http.clone());
-        s.runtime_satisfy(&p_http, "response".to_string()).unwrap();
+        s.runtime_satisfy(&p_http, mp("response")).unwrap();
 
         // The runtime process should have NO chunks stored
         assert!(s.process_chunks.get(&http_process).is_none());
@@ -1343,12 +1347,12 @@ mod tests {
         let p = Proposal {
             process: http_process.clone(),
             event: None,
-            input: "url".to_string(),
+            input: mp("url"),
             promise: None,
         };
         s.add_proposal(p.clone());
 
-        let (_action, new_proposals) = s.runtime_satisfy(&p, "ok".to_string()).unwrap();
+        let (_action, new_proposals) = s.runtime_satisfy(&p, mp("ok")).unwrap();
 
         assert!(new_proposals.is_empty());
     }

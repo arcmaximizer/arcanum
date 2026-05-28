@@ -4,49 +4,108 @@ use crate::{
     types,
 };
 use mlua::Lua;
+use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing;
 
-const WRAPPER_CODE: &str = r#"
-local _yield = coroutine.yield
+fn mlua_to_json(value: &mlua::Value) -> JsonValue {
+    match value {
+        mlua::Value::Nil => JsonValue::Null,
+        mlua::Value::Boolean(b) => JsonValue::Bool(*b),
+        mlua::Value::Integer(i) => {
+            JsonValue::Number(serde_json::Number::from(*i))
+        }
+        mlua::Value::Number(n) => {
+            let num = serde_json::Number::from_f64(*n).unwrap_or(serde_json::Number::from(0));
+            JsonValue::Number(num)
+        }
+        mlua::Value::String(s) => {
+            JsonValue::String(s.to_string_lossy())
+        }
+        mlua::Value::Table(t) => {
+            let mut is_array = true;
+            let mut array = Vec::new();
+            let mut map = serde_json::Map::new();
 
-local function syscall(syscall_type, ...)
-    return _yield({type = syscall_type, args = {...}})
-end
+            for pair in t.pairs::<mlua::Value, mlua::Value>() {
+                if let Ok((k, v)) = pair {
+                    match &k {
+                        mlua::Value::Integer(idx)
+                            if *idx == array.len() as i64 + 1 =>
+                        {
+                            array.push(mlua_to_json(&v));
+                        }
+                        mlua::Value::String(s) => {
+                            is_array = false;
+                            map.insert(s.to_string_lossy(), mlua_to_json(&v));
+                        }
+                        _ => {
+                            is_array = false;
+                            map.insert(format!("{:?}", k), mlua_to_json(&v));
+                        }
+                    }
+                }
+            }
 
-local http = {}
-function http.get(url)
-    return syscall("http_get", url)
-end
+            if is_array && !array.is_empty() {
+                JsonValue::Array(array)
+            } else if !map.is_empty() {
+                JsonValue::Object(map)
+            } else if array.is_empty() {
+                JsonValue::Object(serde_json::Map::new())
+            } else {
+                JsonValue::Array(array)
+            }
+        }
+        _ => JsonValue::Null,
+    }
+}
 
-local kv = {}
-function kv.get(key)
-    return syscall("kv_get", key)
-end
-function kv.set(key, value)
-    return syscall("kv_set", key, value)
-end
+fn json_to_mlua(lua: &Lua, value: &JsonValue) -> mlua::Result<mlua::Value> {
+    match value {
+        JsonValue::Null => Ok(mlua::Value::Nil),
+        JsonValue::Bool(b) => Ok(mlua::Value::Boolean(*b)),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(mlua::Value::Integer(i))
+            } else {
+                Ok(mlua::Value::Number(n.as_f64().unwrap_or(0.0)))
+            }
+        }
+        JsonValue::String(s) => Ok(mlua::Value::String(lua.create_string(s)?)),
+        JsonValue::Array(arr) => {
+            let table = lua.create_table()?;
+            for (i, v) in arr.iter().enumerate() {
+                table.set(i + 1, json_to_mlua(lua, v)?)?;
+            }
+            Ok(mlua::Value::Table(table))
+        }
+        JsonValue::Object(map) => {
+            let table = lua.create_table()?;
+            for (k, v) in map {
+                let key: mlua::Value = mlua::Value::String(lua.create_string(k)?);
+                table.set(key, json_to_mlua(lua, v)?)?;
+            }
+            Ok(mlua::Value::Table(table))
+        }
+    }
+}
 
-local function call(target, input)
-    return syscall("call", target, input)
-end
+fn mlua_value_to_bytes(value: &mlua::Value) -> Vec<u8> {
+    let json = mlua_to_json(value);
+    rmp_serde::to_vec(&json).unwrap_or_default()
+}
 
-local function notify(target, input)
-    return syscall("notify", target, input)
-end
+fn bytes_to_mlua_value(lua: &Lua, bytes: &[u8]) -> mlua::Value {
+    if bytes.is_empty() {
+        return mlua::Value::Nil;
+    }
+    let json: JsonValue = rmp_serde::from_slice(bytes).unwrap_or(JsonValue::Null);
+    json_to_mlua(lua, &json).unwrap_or(mlua::Value::Nil)
+}
 
-rawset(_G, "http", http)
-rawset(_G, "kv", kv)
-rawset(_G, "call", call)
-rawset(_G, "notify", notify)
-rawset(_G, "coroutine", nil)
-rawset(_G, "syscall", nil)
-
-return function(main_fn)
-    return main_fn
-end
-"#;
+const WRAPPER_CODE: &str = include_str!("wrapper.lua");
 
 fn extract_str(value: &mlua::Value, field: &str) -> String {
     value
@@ -60,6 +119,7 @@ fn parse_syscall(
     event: &types::EventId,
     log_seq: u64,
     kv_state: &HashMap<String, String>,
+    lua: &Lua,
 ) -> Syscall {
     let sys_type = extract_str(value, "type");
     let args = value
@@ -87,7 +147,7 @@ fn parse_syscall(
             Syscall::KVWrite { key, new_value }
         }
         "http_get" => {
-            let url = args
+            let url: String = args
                 .as_ref()
                 .and_then(|a| a.get(1).ok())
                 .unwrap_or_default();
@@ -99,7 +159,9 @@ fn parse_syscall(
                         proc: "runtime".to_string(),
                     },
                     event: None,
-                    input: url,
+                    input: mlua_value_to_bytes(&mlua::Value::String(
+                        lua.create_string(&url).unwrap(),
+                    )),
                     promise: Some(scheduler::Promise {
                         id: log_seq,
                         target: event.clone(),
@@ -108,9 +170,9 @@ fn parse_syscall(
             }
         }
         "call" => {
-            let target = args
+            let target: String = args
                 .as_ref()
-                .and_then(|a| a.get::<String>(1).ok())
+                .and_then(|a| a.get(1).ok())
                 .unwrap_or_default();
             let process =
                 types::ProcessId::try_from(target.as_str()).unwrap_or_else(|_| types::ProcessId {
@@ -120,7 +182,8 @@ fn parse_syscall(
                 });
             let input = args
                 .as_ref()
-                .and_then(|a| a.get::<String>(2).ok())
+                .and_then(|a| a.get::<mlua::Value>(2).ok())
+                .map(|v| mlua_value_to_bytes(&v))
                 .unwrap_or_default();
             Syscall::Call {
                 proposal: Proposal {
@@ -135,9 +198,9 @@ fn parse_syscall(
             }
         }
         "notify" => {
-            let target = args
+            let target: String = args
                 .as_ref()
-                .and_then(|a| a.get::<String>(1).ok())
+                .and_then(|a| a.get(1).ok())
                 .unwrap_or_default();
             let process =
                 types::ProcessId::try_from(target.as_str()).unwrap_or_else(|_| types::ProcessId {
@@ -147,7 +210,8 @@ fn parse_syscall(
                 });
             let input = args
                 .as_ref()
-                .and_then(|a| a.get::<String>(2).ok())
+                .and_then(|a| a.get::<mlua::Value>(2).ok())
+                .map(|v| mlua_value_to_bytes(&v))
                 .unwrap_or_default();
             Syscall::Notify {
                 proposal: Proposal {
@@ -220,14 +284,14 @@ pub async fn run_executor(
     while let Some(proposal) = work_rx.recv().await {
         if let Some(ref promise) = proposal.promise {
             tracing::debug!(
-                "Received proposal: process={} {} input={}",
+                "Received proposal: process={} {} input={:?}",
                 proposal.process,
                 promise,
                 proposal.input,
             );
         } else {
             tracing::debug!(
-                "Received proposal: process={} input={}",
+                "Received proposal: process={} input={:?}",
                 proposal.process,
                 proposal.input,
             );
@@ -246,7 +310,7 @@ pub async fn run_executor(
             lua.create_thread(wrapped.clone()).unwrap()
         });
 
-        let mut input = mlua::Value::String(lua.create_string(&proposal.input).unwrap());
+        let mut input = bytes_to_mlua_value(&lua, &proposal.input);
 
         loop {
             let in_event_seq = *event_seqs.entry(event.clone()).or_insert(0);
@@ -259,8 +323,13 @@ pub async fn run_executor(
             match thread.resume::<mlua::Value>(input.clone()) {
                 Ok(mlua::Value::Table(table)) => {
                     tracing::debug!("event={} Got syscall from Lua", event);
-                    let syscall =
-                        parse_syscall(&mlua::Value::Table(table), &event, log_seq, &kv_state);
+                    let syscall = parse_syscall(
+                        &mlua::Value::Table(table),
+                        &event,
+                        log_seq,
+                        &kv_state,
+                        &lua,
+                    );
                     tracing::debug!("event={} Parsed syscall: {:?}", event, syscall);
 
                     let receipt = Receipt {
@@ -268,7 +337,7 @@ pub async fn run_executor(
                         in_event_seq,
                         in_log_seq: log_seq,
                         syscalls: vec![syscall.clone()],
-                        returns: String::default(),
+                        returns: Vec::new(),
                     };
 
                     let is_final_syscall = is_non_blocking(&syscall);
@@ -313,7 +382,7 @@ pub async fn run_executor(
                         }
                         Syscall::Notify { proposal, .. } => {
                             tracing::debug!(
-                                "event={} Notify: target={} input={}",
+                                "event={} Notify: target={} input={:?}",
                                 event,
                                 proposal.process,
                                 proposal.input
@@ -323,7 +392,7 @@ pub async fn run_executor(
                         Syscall::Call { proposal, .. } => {
                             if let Some(ref promise) = proposal.promise {
                                 tracing::debug!(
-                                    "event={} Call: target={} {} input={}",
+                                    "event={} Call: target={} {} input={:?}",
                                     event,
                                     proposal.process,
                                     promise,
@@ -331,7 +400,7 @@ pub async fn run_executor(
                                 );
                             } else {
                                 tracing::debug!(
-                                    "event={} Call: target={} input={}",
+                                    "event={} Call: target={} input={:?}",
                                     event,
                                     proposal.process,
                                     proposal.input
@@ -344,8 +413,8 @@ pub async fn run_executor(
                 }
                 Ok(return_value) => {
                     tracing::debug!("event={} Lua returned: {:?}", event, return_value);
-                    let returns = extract_return(&return_value, &lua);
-                    tracing::debug!("event={} Extracted return: '{}'", event, returns);
+                    let returns = mlua_value_to_bytes(&return_value);
+                    tracing::debug!("event={} Serialized return bytes: {:?}", event, returns);
                     let in_event_seq = *event_seqs.entry(event.clone()).or_insert(0);
 
                     let receipt = Receipt {
@@ -377,19 +446,6 @@ pub async fn run_executor(
     }
 }
 
-fn extract_return(value: &mlua::Value, lua: &Lua) -> String {
-    match value {
-        mlua::Value::Nil => String::new(),
-        mlua::Value::String(s) => s.to_string_lossy(),
-        other => lua
-            .coerce_string(other.clone())
-            .ok()
-            .flatten()
-            .map(|s| s.to_string_lossy())
-            .unwrap_or_default(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +454,14 @@ mod tests {
     use crate::types::{EventId, ProcessId};
     use anyhow::Result;
     use tokio::sync::{mpsc, oneshot};
+
+    fn mp(s: &str) -> Vec<u8> {
+        rmp_serde::to_vec(&serde_json::Value::String(s.into())).unwrap()
+    }
+
+    fn mp_null() -> Vec<u8> {
+        rmp_serde::to_vec(&serde_json::Value::Null).unwrap()
+    }
 
     struct ExecutorHarness {
         scheduler_rx: mpsc::UnboundedReceiver<SchedulerMsg>,
@@ -439,10 +503,11 @@ mod tests {
         }
 
         async fn send_proposal(&mut self, input: &str) -> Proposal {
+            let bytes = mp(input);
             let proposal = Proposal {
                 process: self.process.clone(),
                 event: None,
-                input: input.to_string(),
+                input: bytes,
                 promise: None,
             };
             self.work_tx.send(proposal.clone()).unwrap();
@@ -588,7 +653,7 @@ mod tests {
 
         let (receipt, resp) = h.expect_satisfy(true).await;
         assert_eq!(receipt.syscalls, vec![]);
-        assert_eq!(receipt.returns, "hello");
+        assert_eq!(receipt.returns, mp("hello"));
         assert_eq!(receipt.in_event_seq, 0);
         assert_eq!(receipt.in_log_seq, 0);
         h.respond_satisfy(resp, event);
@@ -603,7 +668,7 @@ mod tests {
         h.drain_to_get_log_seq().await;
 
         let (receipt, resp) = h.expect_satisfy(true).await;
-        assert_eq!(receipt.returns, "");
+        assert_eq!(receipt.returns, mp_null());
         h.respond_satisfy(resp, event);
     }
 
@@ -616,7 +681,7 @@ mod tests {
         h.drain_to_get_log_seq().await;
 
         let (receipt, resp) = h.expect_satisfy(true).await;
-        assert_eq!(receipt.returns, "42");
+        assert_eq!(receipt.returns, rmp_serde::to_vec(&42).unwrap());
         h.respond_satisfy(resp, event);
     }
 
@@ -637,7 +702,7 @@ mod tests {
         let (rec1, resp1) = h.expect_satisfy(false).await;
         assert_eq!(rec1.in_event_seq, 0);
         assert_eq!(rec1.in_log_seq, 0);
-        assert_eq!(rec1.returns, "");
+        assert_eq!(rec1.returns, Vec::<u8>::new());
         assert_eq!(
             rec1.syscalls,
             vec![Syscall::KVRead {
@@ -649,11 +714,11 @@ mod tests {
 
         h.drain_to_get_log_seq().await;
 
-        // Second: final receipt with empty value
+        // Second: final receipt with empty string value (KV state returned "")
         let (rec2, resp2) = h.expect_satisfy(true).await;
         assert_eq!(rec2.in_event_seq, 1);
         assert_eq!(rec2.in_log_seq, 1);
-        assert_eq!(rec2.returns, "");
+        assert_eq!(rec2.returns, mp(""));
         assert_eq!(rec2.syscalls, vec![]);
         h.respond_satisfy(resp2, event);
     }
@@ -702,7 +767,7 @@ mod tests {
         let (rec3, resp3) = h.expect_satisfy(true).await;
         assert_eq!(rec3.in_event_seq, 2);
         assert_eq!(rec3.in_log_seq, 2);
-        assert_eq!(rec3.returns, "42");
+        assert_eq!(rec3.returns, mp("42"));
         assert_eq!(rec3.syscalls, vec![]);
         h.respond_satisfy(resp3, event);
     }
@@ -723,14 +788,14 @@ mod tests {
         let (receipt, resp) = h.expect_satisfy(true).await;
         assert_eq!(receipt.in_event_seq, 0);
         assert_eq!(receipt.in_log_seq, 0);
-        assert_eq!(receipt.returns, "");
+        assert_eq!(receipt.returns, Vec::<u8>::new());
 
         match &receipt.syscalls[0] {
             Syscall::Call { proposal } => {
                 assert_eq!(proposal.process.namespace, "sys");
                 assert_eq!(proposal.process.app, "http");
                 assert_eq!(proposal.process.proc, "runtime");
-                assert_eq!(proposal.input, "https://example.com");
+                assert_eq!(proposal.input, mp("https://example.com"));
                 assert_eq!(
                     proposal.promise,
                     Some(Promise {

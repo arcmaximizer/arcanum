@@ -72,11 +72,15 @@ async fn main() {
 
     // Submit initial proposals via scheduler
 
+    fn msgpack_str(s: &str) -> Vec<u8> {
+        rmp_serde::to_vec(&serde_json::Value::String(s.into())).unwrap_or_default()
+    }
+
     scheduler
         .add_proposal(Proposal {
             process: hello_process.clone(),
             event: None,
-            input: "start".to_string(),
+            input: msgpack_str("start"),
             promise: None,
         })
         .await;
@@ -85,7 +89,7 @@ async fn main() {
         .add_proposal(Proposal {
             process: hello_process.clone(),
             event: None,
-            input: "start".to_string(),
+            input: msgpack_str("start"),
             promise: None,
         })
         .await;
