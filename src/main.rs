@@ -53,7 +53,7 @@ async fn main() {
         scheduler.clone(),
         state.clone(),
         r#"return function(value)
-            return call("^arc/echo/entrypoint", "Hello world!")
+            return call("^arc/echo/entrypoint", { message = "Hello world!" })
         end"#
             .to_string(),
     );
@@ -75,15 +75,6 @@ async fn main() {
     fn msgpack_str(s: &str) -> Vec<u8> {
         rmp_serde::to_vec(&serde_json::Value::String(s.into())).unwrap_or_default()
     }
-
-    scheduler
-        .add_proposal(Proposal {
-            process: hello_process.clone(),
-            event: None,
-            input: msgpack_str("start"),
-            promise: None,
-        })
-        .await;
 
     scheduler
         .add_proposal(Proposal {

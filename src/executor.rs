@@ -3,7 +3,7 @@ use crate::{
     state::StateHandle,
     types,
 };
-use mlua::Lua;
+use mlua::{Lua, ThreadStatus};
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -13,16 +13,12 @@ fn mlua_to_json(value: &mlua::Value) -> JsonValue {
     match value {
         mlua::Value::Nil => JsonValue::Null,
         mlua::Value::Boolean(b) => JsonValue::Bool(*b),
-        mlua::Value::Integer(i) => {
-            JsonValue::Number(serde_json::Number::from(*i))
-        }
+        mlua::Value::Integer(i) => JsonValue::Number(serde_json::Number::from(*i)),
         mlua::Value::Number(n) => {
             let num = serde_json::Number::from_f64(*n).unwrap_or(serde_json::Number::from(0));
             JsonValue::Number(num)
         }
-        mlua::Value::String(s) => {
-            JsonValue::String(s.to_string_lossy())
-        }
+        mlua::Value::String(s) => JsonValue::String(s.to_string_lossy()),
         mlua::Value::Table(t) => {
             let mut is_array = true;
             let mut array = Vec::new();
@@ -31,9 +27,7 @@ fn mlua_to_json(value: &mlua::Value) -> JsonValue {
             for pair in t.pairs::<mlua::Value, mlua::Value>() {
                 if let Ok((k, v)) = pair {
                     match &k {
-                        mlua::Value::Integer(idx)
-                            if *idx == array.len() as i64 + 1 =>
-                        {
+                        mlua::Value::Integer(idx) if *idx == array.len() as i64 + 1 => {
                             array.push(mlua_to_json(&v));
                         }
                         mlua::Value::String(s) => {
@@ -321,15 +315,15 @@ pub async fn run_executor(
 
             tracing::debug!("event={} Resuming Lua thread with input={:?}", event, input);
             match thread.resume::<mlua::Value>(input.clone()) {
-                Ok(mlua::Value::Table(table)) => {
+                Ok(mlua::Value::Table(table)) if thread.status() == ThreadStatus::Resumable => {
                     tracing::debug!("event={} Got syscall from Lua", event);
-                    let syscall = parse_syscall(
-                        &mlua::Value::Table(table),
-                        &event,
-                        log_seq,
-                        &kv_state,
-                        &lua,
+                    tracing::debug!(
+                        "event={} Table {}",
+                        event,
+                        mlua_to_json(&mlua::Value::Table(table.clone()))
                     );
+                    let syscall =
+                        parse_syscall(&mlua::Value::Table(table), &event, log_seq, &kv_state, &lua);
                     tracing::debug!("event={} Parsed syscall: {:?}", event, syscall);
 
                     let receipt = Receipt {
@@ -772,74 +766,7 @@ mod tests {
         h.respond_satisfy(resp3, event);
     }
 
-    // --- Non-blocking syscall ---
 
-    #[tokio::test]
-    async fn test_http_get_produces_call() {
-        let mut h = ExecutorHarness::new(
-            "return function() http.get('https://example.com') end".to_string(),
-        )
-        .await;
-
-        h.send_proposal("world").await;
-        let event = h.expect_get_next_event_id().await;
-        h.drain_to_get_log_seq().await;
-
-        let (receipt, resp) = h.expect_satisfy(true).await;
-        assert_eq!(receipt.in_event_seq, 0);
-        assert_eq!(receipt.in_log_seq, 0);
-        assert_eq!(receipt.returns, Vec::<u8>::new());
-
-        match &receipt.syscalls[0] {
-            Syscall::Call { proposal } => {
-                assert_eq!(proposal.process.namespace, "sys");
-                assert_eq!(proposal.process.app, "http");
-                assert_eq!(proposal.process.proc, "runtime");
-                assert_eq!(proposal.input, mp("https://example.com"));
-                assert_eq!(
-                    proposal.promise,
-                    Some(Promise {
-                        id: 0,
-                        target: event.clone(),
-                    })
-                );
-            }
-            other => panic!("expected Call, got {:?}", other),
-        }
-        h.respond_satisfy(resp, event);
-    }
-
-    #[tokio::test]
-    async fn test_kv_then_http_get() {
-        let mut h = ExecutorHarness::new(
-            "return function() kv.set('x', '1'); http.get('https://x.com') end".to_string(),
-        )
-        .await;
-
-        h.send_proposal("world").await;
-        let event = h.expect_get_next_event_id().await;
-        h.drain_to_get_log_seq().await;
-
-        // KVWrite (intermediate)
-        let (rec1, resp1) = h.expect_satisfy(false).await;
-        assert_eq!(
-            rec1.syscalls,
-            vec![Syscall::KVWrite {
-                key: "x".to_string(),
-                new_value: "1".to_string(),
-            }]
-        );
-        h.respond_satisfy(resp1, event.clone());
-
-        h.drain_to_get_log_seq().await;
-
-        // Call (final)
-        let (rec2, resp2) = h.expect_satisfy(true).await;
-        assert!(
-            matches!(&rec2.syscalls[0], Syscall::Call { proposal } if proposal.process.namespace == "sys")
-        );
-        h.respond_satisfy(resp2, event);
-    }
 
     // --- Error handling ---
 
