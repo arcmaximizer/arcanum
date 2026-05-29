@@ -1,6 +1,6 @@
+use std::io::Write;
 use std::time::{Duration, Instant};
 
-use arcanum::executor::ExecutorHandle;
 use arcanum::manager::ManagerHandle;
 use arcanum::proc::http::HttpHandle;
 use arcanum::scheduler::{
@@ -25,6 +25,34 @@ fn msgpack_value(value: &serde_json::Value) -> Vec<u8> {
 
 fn mp_data(s: &str) -> Vec<u8> {
     msgpack_value(&serde_json::json!({"data": s}))
+}
+
+fn make_tar_gz(code: &str) -> Vec<u8> {
+    let mut tar_bytes = Vec::new();
+    {
+        let mut ar = tar::Builder::new(&mut tar_bytes);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_size(code.len() as u64);
+        header.set_path("main.lua").unwrap();
+        header.set_cksum();
+        ar.append(&header, code.as_bytes()).unwrap();
+        ar.finish().unwrap();
+    }
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&tar_bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+async fn add_app(store: &StoreHandle, namespace: &str, app: &str, code: &str) {
+    let tarball = make_tar_gz(code);
+    let key = store
+        .add_package(tarball.into())
+        .await
+        .expect("failed to add package");
+    let name = format!("^{}/{}", namespace, app);
+    store.set_name(name, key);
 }
 
 async fn wait_for_chunks(
@@ -89,7 +117,7 @@ async fn test_basic_return() {
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),
@@ -108,13 +136,13 @@ async fn test_basic_return() {
         seq: 0,
     };
 
-    let executor = ExecutorHandle::new(
-        process.clone(),
-        scheduler.clone(),
-        state.clone(),
-        r#"return function() return 'hello' end"#.to_string(),
-    );
-    manager.register_executor(process.clone(), executor.sender());
+    add_app(
+        &store,
+        "test",
+        "test",
+        r#"return function() return 'hello' end"#,
+    )
+    .await;
 
     scheduler
         .add_proposal(Proposal {
@@ -143,7 +171,7 @@ async fn test_kv_and_sql() {
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),
@@ -162,10 +190,10 @@ async fn test_kv_and_sql() {
         seq: 0,
     };
 
-    let executor = ExecutorHandle::new(
-        process.clone(),
-        scheduler.clone(),
-        state.clone(),
+    add_app(
+        &store,
+        "test",
+        "test",
         r#"return function()
             kv.set('mykey', 'myvalue')
             local v = kv.get('mykey')
@@ -173,10 +201,9 @@ async fn test_kv_and_sql() {
             sql.exec("INSERT INTO t VALUES ('hello')")
             local r = sql.query("SELECT msg FROM t")
             return {kv = v, sql = r}
-        end"#
-            .to_string(),
-    );
-    manager.register_executor(process.clone(), executor.sender());
+        end"#,
+    )
+    .await;
 
     scheduler
         .add_proposal(Proposal {
@@ -271,7 +298,7 @@ async fn test_lua_error_satisfies() {
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),
@@ -290,13 +317,13 @@ async fn test_lua_error_satisfies() {
         seq: 0,
     };
 
-    let executor = ExecutorHandle::new(
-        process.clone(),
-        scheduler.clone(),
-        state.clone(),
-        r#"return function() error('boom') end"#.to_string(),
-    );
-    manager.register_executor(process.clone(), executor.sender());
+    add_app(
+        &store,
+        "test",
+        "test",
+        r#"return function() error('boom') end"#,
+    )
+    .await;
 
     scheduler
         .add_proposal(Proposal {
@@ -326,7 +353,7 @@ async fn test_notify_routes_to_target() {
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),
@@ -335,26 +362,25 @@ async fn test_notify_routes_to_target() {
 
     let proc_a = ProcessId {
         namespace: "test".into(),
-        app: "test".into(),
-        proc: "a".into(),
+        app: "a".into(),
+        proc: "entrypoint".into(),
     };
     let proc_b = ProcessId {
         namespace: "test".into(),
-        app: "test".into(),
-        proc: "b".into(),
+        app: "b".into(),
+        proc: "entrypoint".into(),
     };
 
-    let executor_a = ExecutorHandle::new(
-        proc_a.clone(),
-        scheduler.clone(),
-        state.clone(),
+    add_app(
+        &store,
+        "test",
+        "a",
         r#"return function()
-            notify("^test/test/b", "hello from a")
+            notify("^test/b/entrypoint", "hello from a")
             return "done"
-        end"#
-            .to_string(),
-    );
-    manager.register_executor(proc_a.clone(), executor_a.sender());
+        end"#,
+    )
+    .await;
 
     // Do NOT register B — the notification should still land in B's schedule
 
@@ -385,7 +411,7 @@ async fn test_call_with_promise_resolution() {
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),
@@ -394,48 +420,45 @@ async fn test_call_with_promise_resolution() {
 
     let proc_a = ProcessId {
         namespace: "test".into(),
-        app: "test".into(),
-        proc: "a".into(),
+        app: "a".into(),
+        proc: "entrypoint".into(),
     };
     let proc_b = ProcessId {
         namespace: "test".into(),
-        app: "test".into(),
-        proc: "b".into(),
+        app: "b".into(),
+        proc: "entrypoint".into(),
     };
     let event_a = EventId {
         namespace: "test".into(),
-        app: "test".into(),
-        proc: "a".into(),
+        app: "a".into(),
+        proc: "entrypoint".into(),
         seq: 0,
     };
     let event_b = EventId {
         namespace: "test".into(),
-        app: "test".into(),
-        proc: "b".into(),
+        app: "b".into(),
+        proc: "entrypoint".into(),
         seq: 0,
     };
 
-    let executor_a = ExecutorHandle::new(
-        proc_a.clone(),
-        scheduler.clone(),
-        state.clone(),
+    add_app(
+        &store,
+        "test",
+        "a",
         r#"return function(v)
-            return call("^test/test/b", "ping")
-        end"#
-            .to_string(),
-    );
-    let executor_b = ExecutorHandle::new(
-        proc_b.clone(),
-        scheduler.clone(),
-        state.clone(),
+            return call("^test/b/entrypoint", "ping")
+        end"#,
+    )
+    .await;
+    add_app(
+        &store,
+        "test",
+        "b",
         r#"return function(v)
             return "pong"
-        end"#
-            .to_string(),
-    );
-
-    manager.register_executor(proc_a.clone(), executor_a.sender());
-    manager.register_executor(proc_b.clone(), executor_b.sender());
+        end"#,
+    )
+    .await;
 
     scheduler
         .add_proposal(Proposal {
@@ -480,7 +503,7 @@ async fn test_concurrent_proposals_ordered() {
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),
@@ -489,34 +512,33 @@ async fn test_concurrent_proposals_ordered() {
 
     let process = ProcessId {
         namespace: "test".into(),
-        app: "test".into(),
-        proc: "counter".into(),
+        app: "counter".into(),
+        proc: "entrypoint".into(),
     };
     let event1 = EventId {
         namespace: "test".into(),
-        app: "test".into(),
-        proc: "counter".into(),
+        app: "counter".into(),
+        proc: "entrypoint".into(),
         seq: 0,
     };
     let event2 = EventId {
         namespace: "test".into(),
-        app: "test".into(),
-        proc: "counter".into(),
+        app: "counter".into(),
+        proc: "entrypoint".into(),
         seq: 1,
     };
 
-    let executor = ExecutorHandle::new(
-        process.clone(),
-        scheduler.clone(),
-        state.clone(),
+    add_app(
+        &store,
+        "test",
+        "counter",
         r#"return function(v)
             local prev = kv.get('counter')
             kv.set('counter', v)
             return prev
-        end"#
-            .to_string(),
-    );
-    manager.register_executor(process.clone(), executor.sender());
+        end"#,
+    )
+    .await;
 
     // Set initial state
     state
@@ -624,7 +646,7 @@ async fn test_stateless_satisfy_resolves_promise() {
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),
@@ -648,16 +670,15 @@ async fn test_stateless_satisfy_resolves_promise() {
         seq: 0,
     };
 
-    let executor_caller = ExecutorHandle::new(
-        caller_proc.clone(),
-        scheduler.clone(),
-        state.clone(),
+    add_app(
+        &store,
+        "test",
+        "test",
         r#"return function(v)
             return call("^sys/http", v)
-        end"#
-            .to_string(),
-    );
-    manager.register_executor(caller_proc.clone(), executor_caller.sender());
+        end"#,
+    )
+    .await;
 
     // Create a stateless channel (simulates an HTTP-like process)
     let (stateless_tx, mut stateless_rx) = mpsc::unbounded_channel();
@@ -723,7 +744,7 @@ async fn test_http_client_get() {
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),
@@ -750,16 +771,15 @@ async fn test_http_client_get() {
         seq: 0,
     };
 
-    let executor = ExecutorHandle::new(
-        caller_proc.clone(),
-        scheduler.clone(),
-        state.clone(),
+    add_app(
+        &store,
+        "test",
+        "test",
         r#"return function(v)
             return call("^sys/http", v)
-        end"#
-            .to_string(),
-    );
-    manager.register_executor(caller_proc.clone(), executor.sender());
+        end"#,
+    )
+    .await;
 
     let input = msgpack_value(&serde_json::json!({
         "method": "GET",
@@ -818,7 +838,7 @@ async fn test_http_client_post() {
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),
@@ -845,16 +865,15 @@ async fn test_http_client_post() {
         seq: 0,
     };
 
-    let executor = ExecutorHandle::new(
-        caller_proc.clone(),
-        scheduler.clone(),
-        state.clone(),
+    add_app(
+        &store,
+        "test",
+        "test",
         r#"return function(v)
             return call("^sys/http", v)
-        end"#
-            .to_string(),
-    );
-    manager.register_executor(caller_proc.clone(), executor.sender());
+        end"#,
+    )
+    .await;
 
     let input = msgpack_value(&serde_json::json!({
         "method": "POST",
@@ -892,7 +911,7 @@ async fn test_http_server_routes_by_host_header() {
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),
@@ -902,23 +921,22 @@ async fn test_http_server_routes_by_host_header() {
     let server = HttpServerHandle::new(scheduler.clone(), manager.clone(), 0).await;
     let port = server.port;
 
-    // Register a simple echo executor
+    // Register a simple echo executor via the store
     let process = ProcessId {
         namespace: "test".into(),
         app: "echo".into(),
         proc: "entrypoint".into(),
     };
 
-    let executor = ExecutorHandle::new(
-        process.clone(),
-        scheduler.clone(),
-        state.clone(),
+    add_app(
+        &store,
+        "test",
+        "echo",
         r#"return function(v)
             return "echo: " .. v
-        end"#
-            .to_string(),
-    );
-    manager.register_executor(process.clone(), executor.sender());
+        end"#,
+    )
+    .await;
 
     // Register host route via the http-server stateless handler
     let http_server_proc = ProcessId {
