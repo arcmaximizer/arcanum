@@ -1,11 +1,11 @@
-use crate::manager::RuntimeCall;
+use crate::manager::StatelessCall;
 use crate::scheduler::SchedulerHandle;
 use serde_json::Value as JsonValue;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 pub struct HttpHandle {
-    sender: mpsc::UnboundedSender<RuntimeCall>,
+    sender: mpsc::UnboundedSender<StatelessCall>,
 }
 
 impl HttpHandle {
@@ -15,7 +15,7 @@ impl HttpHandle {
         Self { sender }
     }
 
-    pub fn sender(&self) -> mpsc::UnboundedSender<RuntimeCall> {
+    pub fn sender(&self) -> mpsc::UnboundedSender<StatelessCall> {
         self.sender.clone()
     }
 }
@@ -45,7 +45,7 @@ fn encode_error(msg: &str) -> Vec<u8> {
     rmp_serde::to_vec(&wrapped).unwrap_or_default()
 }
 
-async fn run(mut rx: mpsc::UnboundedReceiver<RuntimeCall>, scheduler: SchedulerHandle) {
+async fn run(mut rx: mpsc::UnboundedReceiver<StatelessCall>, scheduler: SchedulerHandle) {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -56,7 +56,7 @@ async fn run(mut rx: mpsc::UnboundedReceiver<RuntimeCall>, scheduler: SchedulerH
             Ok(v) => v,
             Err(e) => {
                 let _ = scheduler
-                    .runtime_satisfy(call.proposal, encode_error(&format!("bad input: {}", e)))
+                    .stateless_satisfy(call.proposal, encode_error(&format!("bad input: {}", e)))
                     .await;
                 continue;
             }
@@ -67,7 +67,7 @@ async fn run(mut rx: mpsc::UnboundedReceiver<RuntimeCall>, scheduler: SchedulerH
             Ok(m) => m,
             Err(e) => {
                 let _ = scheduler
-                    .runtime_satisfy(call.proposal, encode_error(&e))
+                    .stateless_satisfy(call.proposal, encode_error(&e))
                     .await;
                 continue;
             }
@@ -77,7 +77,7 @@ async fn run(mut rx: mpsc::UnboundedReceiver<RuntimeCall>, scheduler: SchedulerH
             Some(u) => u,
             None => {
                 let _ = scheduler
-                    .runtime_satisfy(call.proposal, encode_error("missing url"))
+                    .stateless_satisfy(call.proposal, encode_error("missing url"))
                     .await;
                 continue;
             }
@@ -125,7 +125,7 @@ async fn run(mut rx: mpsc::UnboundedReceiver<RuntimeCall>, scheduler: SchedulerH
             Ok(r) => r,
             Err(e) => {
                 let _ = scheduler
-                    .runtime_satisfy(
+                    .stateless_satisfy(
                         call.proposal,
                         encode_error(&format!("request failed: {}", e)),
                     )
@@ -153,7 +153,7 @@ async fn run(mut rx: mpsc::UnboundedReceiver<RuntimeCall>, scheduler: SchedulerH
             Ok(b) => b,
             Err(e) => {
                 let _ = scheduler
-                    .runtime_satisfy(
+                    .stateless_satisfy(
                         call.proposal,
                         encode_error(&format!("failed to read body: {}", e)),
                     )
@@ -172,6 +172,6 @@ async fn run(mut rx: mpsc::UnboundedReceiver<RuntimeCall>, scheduler: SchedulerH
 
         let wrapped = serde_json::json!({ "data": resp_json });
         let bytes = rmp_serde::to_vec(&wrapped).unwrap_or_default();
-        let _ = scheduler.runtime_satisfy(call.proposal, bytes).await;
+        let _ = scheduler.stateless_satisfy(call.proposal, bytes).await;
     }
 }

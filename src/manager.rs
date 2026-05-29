@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
-pub struct RuntimeCall {
+pub struct StatelessCall {
     pub proposal: Proposal,
 }
 
@@ -20,11 +20,11 @@ pub enum ManagerMsg {
     UnregisterExecutor {
         process: ProcessId,
     },
-    RegisterRuntime {
+    RegisterStateless {
         process: ProcessId,
-        tx: mpsc::UnboundedSender<RuntimeCall>,
+        tx: mpsc::UnboundedSender<StatelessCall>,
     },
-    UnregisterRuntime {
+    UnregisterStateless {
         process: ProcessId,
     },
     RouteProposal {
@@ -54,14 +54,14 @@ impl ManagerHandle {
         let _ = self.sender.send(ManagerMsg::UnregisterExecutor { process });
     }
 
-    pub fn register_runtime(&self, process: ProcessId, tx: mpsc::UnboundedSender<RuntimeCall>) {
+    pub fn register_stateless(&self, process: ProcessId, tx: mpsc::UnboundedSender<StatelessCall>) {
         let _ = self
             .sender
-            .send(ManagerMsg::RegisterRuntime { process, tx });
+            .send(ManagerMsg::RegisterStateless { process, tx });
     }
 
-    pub fn unregister_runtime(&self, process: ProcessId) {
-        let _ = self.sender.send(ManagerMsg::UnregisterRuntime { process });
+    pub fn unregister_stateless(&self, process: ProcessId) {
+        let _ = self.sender.send(ManagerMsg::UnregisterStateless { process });
     }
 
     pub fn route_proposal(&self, proposal: Proposal) {
@@ -76,7 +76,7 @@ pub async fn run_manager(
     state: StateHandle,
 ) {
     let mut executor_senders: HashMap<ProcessId, mpsc::UnboundedSender<Proposal>> = HashMap::new();
-    let mut runtime_senders: HashMap<ProcessId, mpsc::UnboundedSender<RuntimeCall>> =
+    let mut stateless_senders: HashMap<ProcessId, mpsc::UnboundedSender<StatelessCall>> =
         HashMap::new();
 
     while let Some(msg) = rx.recv().await {
@@ -89,20 +89,20 @@ pub async fn run_manager(
                 tracing::debug!("manager: unregistered executor {}", process);
                 executor_senders.remove(&process);
             }
-            ManagerMsg::RegisterRuntime { process, tx } => {
-                tracing::debug!("manager: registered runtime {}", process);
-                runtime_senders.insert(process, tx);
+            ManagerMsg::RegisterStateless { process, tx } => {
+                tracing::debug!("manager: registered stateless {}", process);
+                stateless_senders.insert(process, tx);
             }
-            ManagerMsg::UnregisterRuntime { process } => {
-                tracing::debug!("manager: unregistered runtime {}", process);
-                runtime_senders.remove(&process);
+            ManagerMsg::UnregisterStateless { process } => {
+                tracing::debug!("manager: unregistered stateless {}", process);
+                stateless_senders.remove(&process);
             }
             ManagerMsg::RouteProposal { proposal } => {
                 let process = &proposal.process;
                 tracing::debug!("manager: routing proposal to {}", process);
 
-                if let Some(tx) = runtime_senders.get(process) {
-                    let _ = tx.send(RuntimeCall { proposal });
+                if let Some(tx) = stateless_senders.get(process) {
+                    let _ = tx.send(StatelessCall { proposal });
                     continue;
                 }
 

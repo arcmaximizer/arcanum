@@ -616,10 +616,10 @@ async fn test_concurrent_proposals_ordered() {
     assert!(scheduler.get_next(process.clone()).await.is_none());
 }
 
-// --- Test 6: Runtime satisfy ---
+// --- Test 6: Stateless satisfy ---
 
 #[tokio::test]
-async fn test_runtime_satisfy_resolves_promise() {
+async fn test_stateless_satisfy_resolves_promise() {
     let (sched_tx, sched_rx) = mpsc::unbounded_channel();
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
@@ -636,7 +636,7 @@ async fn test_runtime_satisfy_resolves_promise() {
         app: "test".into(),
         proc: "caller".into(),
     };
-    let runtime_proc = ProcessId {
+    let stateless_proc = ProcessId {
         namespace: "sys".into(),
         app: "http".into(),
         proc: "entrypoint".into(),
@@ -653,15 +653,15 @@ async fn test_runtime_satisfy_resolves_promise() {
         scheduler.clone(),
         state.clone(),
         r#"return function(v)
-            return call("^sys/http", "https://example.com")
+            return call("^sys/http", v)
         end"#
             .to_string(),
     );
     manager.register_executor(caller_proc.clone(), executor_caller.sender());
 
-    // Create a runtime channel (simulates an HTTP-like process)
-    let (runtime_tx, mut runtime_rx) = mpsc::unbounded_channel();
-    manager.register_runtime(runtime_proc.clone(), runtime_tx);
+    // Create a stateless channel (simulates an HTTP-like process)
+    let (stateless_tx, mut stateless_rx) = mpsc::unbounded_channel();
+    manager.register_stateless(stateless_proc.clone(), stateless_tx);
 
     // Send proposal to caller
     scheduler
@@ -673,18 +673,18 @@ async fn test_runtime_satisfy_resolves_promise() {
         })
         .await;
 
-    // Wait for the runtime to receive the call
-    let runtime_call = tokio::time::timeout(Duration::from_secs(2), runtime_rx.recv())
+    // Wait for the stateless process to receive the call
+    let stateless_call = tokio::time::timeout(Duration::from_secs(2), stateless_rx.recv())
         .await
         .expect("timeout")
-        .expect("runtime channel closed");
-    assert_eq!(runtime_call.proposal.input, mp("https://example.com"));
+        .expect("stateless channel closed");
+    assert_eq!(stateless_call.proposal.input, mp("start"));
 
-    // Runtime responds via runtime_satisfy — must wrap in { data = ... }
+    // Stateless process responds via stateless_satisfy — must wrap in { data = ... }
     let response = format!("fetched: https://example.com");
     let wrapped_response = msgpack_value(&serde_json::json!({"data": response}));
     scheduler
-        .runtime_satisfy(runtime_call.proposal, wrapped_response.clone())
+        .stateless_satisfy(stateless_call.proposal, wrapped_response.clone())
         .await
         .unwrap();
 
@@ -695,7 +695,7 @@ async fn test_runtime_satisfy_resolves_promise() {
     assert_eq!(chunks[0].returns, Vec::<u8>::new());
     assert!(matches!(
         &chunks[0].syscalls[0],
-        Syscall::Call { proposal } if proposal.process == runtime_proc
+        Syscall::Call { proposal } if proposal.process == stateless_proc
     ));
     assert_eq!(chunks[1].status, RuntimeStatus::End);
     assert_eq!(chunks[1].returns, wrapped_response);
@@ -736,7 +736,7 @@ async fn test_http_client_get() {
         app: "http".into(),
         proc: "entrypoint".into(),
     };
-    manager.register_runtime(http_process.clone(), http.sender());
+    manager.register_stateless(http_process.clone(), http.sender());
 
     let caller_proc = ProcessId {
         namespace: "test".into(),
@@ -831,7 +831,7 @@ async fn test_http_client_post() {
         app: "http".into(),
         proc: "entrypoint".into(),
     };
-    manager.register_runtime(http_process.clone(), http.sender());
+    manager.register_stateless(http_process.clone(), http.sender());
 
     let caller_proc = ProcessId {
         namespace: "test".into(),

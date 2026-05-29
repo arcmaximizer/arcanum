@@ -74,7 +74,7 @@ async fn main() {
 
     manager.register_executor(hello_process.clone(), hello.sender());
 
-    // Register sys/http as a runtime process
+    // Register sys/http as a stateless process
     let http_process = ProcessId {
         namespace: "sys".to_string(),
         app: "http".to_string(),
@@ -82,7 +82,7 @@ async fn main() {
     };
 
     let http = HttpHandle::new(scheduler.clone());
-    manager.register_runtime(http_process.clone(), http.sender());
+    manager.register_stateless(http_process.clone(), http.sender());
 
     // Start HTTP server on port 6202
     let _http_server = HttpServerHandle::new(scheduler.clone(), 6202).await;

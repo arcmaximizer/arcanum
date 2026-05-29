@@ -34,7 +34,7 @@ pub enum SchedulerMsg {
         completes_proposal: bool,
         resp: tokio::sync::oneshot::Sender<Result<()>>,
     },
-    RuntimeSatisfy {
+    StatelessSatisfy {
         proposal: Proposal,
         returns: Vec<u8>,
         resp: tokio::sync::oneshot::Sender<Result<()>>,
@@ -106,16 +106,16 @@ pub async fn run_scheduler(
                 }
                 let _ = resp.send(result.map(|_| ()));
             }
-            SchedulerMsg::RuntimeSatisfy {
+            SchedulerMsg::StatelessSatisfy {
                 proposal,
                 returns,
                 resp,
             } => {
-                let result = scheduler.runtime_satisfy(&proposal, returns);
+                let result = scheduler.stateless_satisfy(&proposal, returns);
                 if let Ok((_action, new_proposals)) = &result {
                     if !new_proposals.is_empty() {
                         tracing::debug!(
-                            "Adding {} new proposals from runtime_satisfy:",
+                            "Adding {} new proposals from stateless_satisfy:",
                             new_proposals.len()
                         );
                         for p in new_proposals {
@@ -234,10 +234,10 @@ impl SchedulerHandle {
         resp_rx.await.expect("Scheduler task has been killed")
     }
 
-    pub async fn runtime_satisfy(&self, proposal: Proposal, returns: Vec<u8>) -> Result<()> {
+    pub async fn stateless_satisfy(&self, proposal: Proposal, returns: Vec<u8>) -> Result<()> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.sender
-            .send(SchedulerMsg::RuntimeSatisfy {
+            .send(SchedulerMsg::StatelessSatisfy {
                 proposal,
                 returns,
                 resp: resp_tx,
@@ -317,7 +317,7 @@ pub trait Scheduler {
     ) -> Result<(NextAction, Vec<Proposal>)>;
     fn get_chunks_from_event(&self, event: &EventId) -> Option<&Vec<Receipt>>;
     fn get_chunk_from_event(&self, event: &EventId, chunk_seq: u64) -> Option<&Receipt>;
-    fn runtime_satisfy(
+    fn stateless_satisfy(
         &mut self,
         proposal: &Proposal,
         returns: Vec<u8>,
@@ -525,7 +525,7 @@ impl Scheduler for InMemoryScheduler {
         self.event_chunks.get(event)?.get(chunk_seq as usize)
     }
 
-    fn runtime_satisfy(
+    fn stateless_satisfy(
         &mut self,
         proposal: &Proposal,
         returns: Vec<u8>,
