@@ -1,4 +1,5 @@
-use crate::scheduler::{RuntimeCall, SchedulerHandle};
+use crate::manager::RuntimeCall;
+use crate::scheduler::SchedulerHandle;
 use tokio::sync::mpsc;
 
 pub struct HttpHandle {

@@ -1,10 +1,15 @@
 use crate::executor::ExecutorHandle;
-use crate::scheduler::{Proposal, RuntimeCall, SchedulerHandle};
+use crate::scheduler::{Proposal, SchedulerHandle};
 use crate::state::StateHandle;
 use crate::store::StoreHandle;
 use crate::types::ProcessId;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
+
+#[derive(Debug, Clone)]
+pub struct RuntimeCall {
+    pub proposal: Proposal,
+}
 
 #[derive(Debug)]
 pub enum ManagerMsg {
@@ -113,10 +118,7 @@ pub async fn run_manager(
                     app.into()
                 };
 
-                match store
-                    .get_asset_by_name(app_id, "entrypoint.lua".into())
-                    .await
-                {
+                match store.get_asset_by_name(app_id, "main.lua".into()).await {
                     Some(code_bytes) => {
                         let code = String::from_utf8_lossy(&code_bytes).into_owned();
                         let handle = ExecutorHandle::new(

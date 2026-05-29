@@ -8,9 +8,12 @@ mod store;
 mod types;
 
 use executor::ExecutorHandle;
+use manager::ManagerHandle;
 use proc::http::HttpHandle;
-use scheduler::{InMemoryScheduler, Proposal, SchedulerHandle};
+use scheduler::{InMemoryScheduler, Proposal, SchedulerHandle, run_scheduler};
 use state::{InMemoryKVState, StateHandle};
+use store::{InMemoryPackageStore, StoreHandle};
+use tokio::sync::mpsc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use types::ProcessId;
 
@@ -21,8 +24,16 @@ async fn main() {
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let scheduler = SchedulerHandle::new(Box::new(InMemoryScheduler::new()));
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
 
     // Create echo process
     let echo_process = ProcessId {
@@ -41,7 +52,7 @@ async fn main() {
             .to_string(),
     );
 
-    scheduler.register_executor(echo_process.clone(), echo.sender());
+    manager.register_executor(echo_process.clone(), echo.sender());
 
     // Create hello process
     let hello_process = ProcessId {
@@ -60,7 +71,7 @@ async fn main() {
             .to_string(),
     );
 
-    scheduler.register_executor(hello_process.clone(), hello.sender());
+    manager.register_executor(hello_process.clone(), hello.sender());
 
     // Register sys/http as a runtime process
     let http_process = ProcessId {
@@ -70,7 +81,7 @@ async fn main() {
     };
 
     let http = HttpHandle::new(scheduler.clone());
-    scheduler.register_runtime(http_process.clone(), http.sender());
+    manager.register_runtime(http_process.clone(), http.sender());
 
     // Submit initial proposals via scheduler
 

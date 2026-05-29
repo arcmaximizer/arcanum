@@ -1,10 +1,12 @@
 use std::time::{Duration, Instant};
 
 use arcanum::executor::ExecutorHandle;
+use arcanum::manager::ManagerHandle;
 use arcanum::scheduler::{
-    InMemoryScheduler, Proposal, Receipt, RuntimeStatus, SchedulerHandle, Syscall,
+    InMemoryScheduler, Proposal, Receipt, RuntimeStatus, SchedulerHandle, Syscall, run_scheduler,
 };
 use arcanum::state::{InMemoryKVState, StateHandle};
+use arcanum::store::{InMemoryPackageStore, StoreHandle};
 use arcanum::types::{EventId, ProcessId};
 use tokio::sync::mpsc;
 
@@ -82,8 +84,16 @@ async fn wait_for_empty_schedule(
 
 #[tokio::test]
 async fn test_basic_return() {
-    let scheduler = SchedulerHandle::new(Box::new(InMemoryScheduler::new()));
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
 
     let process = ProcessId {
         namespace: "test".into(),
@@ -103,7 +113,7 @@ async fn test_basic_return() {
         state.clone(),
         r#"return function() return 'hello' end"#.to_string(),
     );
-    scheduler.register_executor(process.clone(), executor.sender());
+    manager.register_executor(process.clone(), executor.sender());
 
     scheduler
         .add_proposal(Proposal {
@@ -128,8 +138,16 @@ async fn test_basic_return() {
 
 #[tokio::test]
 async fn test_kv_get() {
-    let scheduler = SchedulerHandle::new(Box::new(InMemoryScheduler::new()));
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
 
     let process = ProcessId {
         namespace: "test".into(),
@@ -153,7 +171,7 @@ async fn test_kv_get() {
         end"#
             .to_string(),
     );
-    scheduler.register_executor(process.clone(), executor.sender());
+    manager.register_executor(process.clone(), executor.sender());
 
     scheduler
         .add_proposal(Proposal {
@@ -188,8 +206,16 @@ async fn test_kv_get() {
 
 #[tokio::test]
 async fn test_lua_error_satisfies() {
-    let scheduler = SchedulerHandle::new(Box::new(InMemoryScheduler::new()));
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
 
     let process = ProcessId {
         namespace: "test".into(),
@@ -209,7 +235,7 @@ async fn test_lua_error_satisfies() {
         state.clone(),
         r#"return function() error('boom') end"#.to_string(),
     );
-    scheduler.register_executor(process.clone(), executor.sender());
+    manager.register_executor(process.clone(), executor.sender());
 
     scheduler
         .add_proposal(Proposal {
@@ -235,8 +261,16 @@ async fn test_lua_error_satisfies() {
 
 #[tokio::test]
 async fn test_notify_routes_to_target() {
-    let scheduler = SchedulerHandle::new(Box::new(InMemoryScheduler::new()));
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
 
     let proc_a = ProcessId {
         namespace: "test".into(),
@@ -259,7 +293,7 @@ async fn test_notify_routes_to_target() {
         end"#
             .to_string(),
     );
-    scheduler.register_executor(proc_a.clone(), executor_a.sender());
+    manager.register_executor(proc_a.clone(), executor_a.sender());
 
     // Do NOT register B — the notification should still land in B's schedule
 
@@ -286,8 +320,16 @@ async fn test_notify_routes_to_target() {
 
 #[tokio::test]
 async fn test_call_with_promise_resolution() {
-    let scheduler = SchedulerHandle::new(Box::new(InMemoryScheduler::new()));
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
 
     let proc_a = ProcessId {
         namespace: "test".into(),
@@ -331,8 +373,8 @@ async fn test_call_with_promise_resolution() {
             .to_string(),
     );
 
-    scheduler.register_executor(proc_a.clone(), executor_a.sender());
-    scheduler.register_executor(proc_b.clone(), executor_b.sender());
+    manager.register_executor(proc_a.clone(), executor_a.sender());
+    manager.register_executor(proc_b.clone(), executor_b.sender());
 
     scheduler
         .add_proposal(Proposal {
@@ -373,8 +415,16 @@ async fn test_call_with_promise_resolution() {
 
 #[tokio::test]
 async fn test_runtime_satisfy_resolves_promise() {
-    let scheduler = SchedulerHandle::new(Box::new(InMemoryScheduler::new()));
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
 
     let caller_proc = ProcessId {
         namespace: "test".into(),
@@ -402,11 +452,11 @@ async fn test_runtime_satisfy_resolves_promise() {
         end"#
             .to_string(),
     );
-    scheduler.register_executor(caller_proc.clone(), executor_caller.sender());
+    manager.register_executor(caller_proc.clone(), executor_caller.sender());
 
     // Create a runtime channel (simulates an HTTP-like process)
     let (runtime_tx, mut runtime_rx) = mpsc::unbounded_channel();
-    scheduler.register_runtime(runtime_proc.clone(), runtime_tx);
+    manager.register_runtime(runtime_proc.clone(), runtime_tx);
 
     // Send proposal to caller
     scheduler

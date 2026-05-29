@@ -307,13 +307,7 @@ pub async fn run_executor(
                     map.insert("data".to_string(), mlua_to_json(&return_value));
                     let returns =
                         rmp_serde::to_vec(&serde_json::Value::Object(map)).unwrap_or_default();
-                    if !returns.is_empty() {
-                        tracing::debug!(
-                            "event={} Serialized return bytes: {}",
-                            event,
-                            bytes_to_json_pretty(&returns)
-                        );
-                    }
+
                     let in_event_seq = *event_seqs.entry(event.clone()).or_insert(0);
 
                     let receipt = Receipt {
@@ -329,7 +323,7 @@ pub async fn run_executor(
                         .satisfy(proposal.clone(), receipt, true)
                         .await
                         .unwrap();
-                    tracing::debug!("event={} Sent final satisfy, awaiting response", event);
+
                     tracing::debug!("event={} Final satisfy complete, breaking loop", event);
 
                     threads.remove(&event);

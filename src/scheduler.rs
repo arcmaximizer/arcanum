@@ -1,34 +1,16 @@
 use crate::conversions::bytes_to_json_pretty;
+use crate::manager::ManagerHandle;
 use crate::types::{EventId, ProcessId};
 use anyhow::{Result, anyhow, bail};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::{mpsc, oneshot};
 use tracing;
-
-#[derive(Debug, Clone)]
-pub struct RuntimeCall {
-    pub proposal: Proposal,
-}
 
 #[derive(Debug)]
 pub enum SchedulerMsg {
     AddProposal {
         proposal: Proposal,
         resp: tokio::sync::oneshot::Sender<u64>,
-    },
-    RegisterExecutor {
-        process: ProcessId,
-        tx: mpsc::UnboundedSender<Proposal>,
-    },
-    UnregisterExecutor {
-        process: ProcessId,
-    },
-    RegisterRuntime {
-        process: ProcessId,
-        tx: mpsc::UnboundedSender<RuntimeCall>,
-    },
-    UnregisterRuntime {
-        process: ProcessId,
     },
     GetNext {
         process: ProcessId,
@@ -62,46 +44,15 @@ pub enum SchedulerMsg {
 pub async fn run_scheduler(
     mut rx: mpsc::UnboundedReceiver<SchedulerMsg>,
     mut scheduler: Box<dyn Scheduler + Send>,
+    manager: ManagerHandle,
 ) {
-    let mut executor_senders: HashMap<ProcessId, mpsc::UnboundedSender<Proposal>> = HashMap::new();
-    let mut runtime_senders: HashMap<ProcessId, mpsc::UnboundedSender<RuntimeCall>> =
-        HashMap::new();
-
-    fn route_proposal(
-        proposal: &Proposal,
-        executors: &HashMap<ProcessId, mpsc::UnboundedSender<Proposal>>,
-        runtimes: &HashMap<ProcessId, mpsc::UnboundedSender<RuntimeCall>>,
-    ) {
-        if let Some(rx) = runtimes.get(&proposal.process) {
-            let _ = rx.send(RuntimeCall {
-                proposal: proposal.clone(),
-            });
-        } else if let Some(tx) = executors.get(&proposal.process) {
-            let _ = tx.send(proposal.clone());
-        }
-    }
-
     while let Some(msg) = rx.recv().await {
         match msg {
             SchedulerMsg::AddProposal { proposal, resp } => {
                 let id = scheduler.add_proposal(proposal.clone());
                 let _ = resp.send(id);
 
-                route_proposal(&proposal, &executor_senders, &runtime_senders);
-            }
-            SchedulerMsg::RegisterExecutor { process, tx } => {
-                executor_senders.insert(process, tx);
-            }
-            SchedulerMsg::UnregisterExecutor { process } => {
-                executor_senders.remove(&process);
-            }
-            SchedulerMsg::RegisterRuntime { process, tx } => {
-                scheduler.register_runtime(process.clone());
-                runtime_senders.insert(process, tx);
-            }
-            SchedulerMsg::UnregisterRuntime { process } => {
-                scheduler.unregister_runtime(&process);
-                runtime_senders.remove(&process);
+                manager.route_proposal(proposal);
             }
             SchedulerMsg::GetNext { process, resp } => {
                 let proposal = scheduler.get_next_proposal(&process).cloned();
@@ -150,7 +101,7 @@ pub async fn run_scheduler(
                         }
                     }
                     for p in new_proposals {
-                        route_proposal(p, &executor_senders, &runtime_senders);
+                        manager.route_proposal(p.clone());
                     }
                 }
                 let _ = resp.send(result.map(|_| ()));
@@ -185,7 +136,7 @@ pub async fn run_scheduler(
                         }
                     }
                     for p in new_proposals {
-                        route_proposal(p, &executor_senders, &runtime_senders);
+                        manager.route_proposal(p.clone());
                     }
                 }
                 let _ = resp.send(result.map(|_| ()));
@@ -200,9 +151,9 @@ pub struct SchedulerHandle {
 }
 
 impl SchedulerHandle {
-    pub fn new(scheduler: Box<dyn Scheduler + Send>) -> Self {
+    pub fn new(scheduler: Box<dyn Scheduler + Send>, manager: ManagerHandle) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
-        tokio::spawn(run_scheduler(receiver, scheduler));
+        tokio::spawn(run_scheduler(receiver, scheduler, manager));
         Self { sender }
     }
 
@@ -219,30 +170,6 @@ impl SchedulerHandle {
             })
             .expect("Scheduler task has been killed");
         resp_rx.await.expect("Scheduler task has been killed")
-    }
-
-    pub fn register_executor(&self, process: ProcessId, tx: mpsc::UnboundedSender<Proposal>) {
-        self.sender
-            .send(SchedulerMsg::RegisterExecutor { process, tx })
-            .expect("Scheduler task has been killed");
-    }
-
-    pub fn unregister_executor(&self, process: ProcessId) {
-        self.sender
-            .send(SchedulerMsg::UnregisterExecutor { process })
-            .expect("Scheduler task has been killed");
-    }
-
-    pub fn register_runtime(&self, process: ProcessId, tx: mpsc::UnboundedSender<RuntimeCall>) {
-        self.sender
-            .send(SchedulerMsg::RegisterRuntime { process, tx })
-            .expect("Scheduler task has been killed");
-    }
-
-    pub fn unregister_runtime(&self, process: ProcessId) {
-        self.sender
-            .send(SchedulerMsg::UnregisterRuntime { process })
-            .expect("Scheduler task has been killed");
     }
 
     pub async fn get_next(&self, process: ProcessId) -> Option<Proposal> {
@@ -388,9 +315,6 @@ pub trait Scheduler {
     ) -> Result<(NextAction, Vec<Proposal>)>;
     fn get_chunks_from_event(&self, event: &EventId) -> Option<&Vec<Receipt>>;
     fn get_chunk_from_event(&self, event: &EventId, chunk_seq: u64) -> Option<&Receipt>;
-    fn register_runtime(&mut self, process: ProcessId);
-    fn unregister_runtime(&mut self, process: &ProcessId);
-    fn is_runtime(&self, process: &ProcessId) -> bool;
     fn runtime_satisfy(
         &mut self,
         proposal: &Proposal,
@@ -403,8 +327,6 @@ pub struct InMemoryScheduler {
     pub process_chunks: HashMap<ProcessId, Vec<Receipt>>,
     pub schedule: HashMap<ProcessId, VecDeque<Proposal>>,
     pub event_counter: HashMap<ProcessId, u64>,
-    // pub proposal_counter: u64,
-    pub runtime_processes: HashSet<ProcessId>,
 }
 
 impl InMemoryScheduler {
@@ -414,8 +336,6 @@ impl InMemoryScheduler {
             process_chunks: HashMap::new(),
             schedule: HashMap::new(),
             event_counter: HashMap::new(),
-            // proposal_counter: 0,
-            runtime_processes: HashSet::new(),
         }
     }
 }
@@ -601,18 +521,6 @@ impl Scheduler for InMemoryScheduler {
     }
     fn get_chunk_from_event(&self, event: &EventId, chunk_seq: u64) -> Option<&Receipt> {
         self.event_chunks.get(event)?.get(chunk_seq as usize)
-    }
-
-    fn register_runtime(&mut self, process: ProcessId) {
-        self.runtime_processes.insert(process);
-    }
-
-    fn unregister_runtime(&mut self, process: &ProcessId) {
-        self.runtime_processes.remove(process);
-    }
-
-    fn is_runtime(&self, process: &ProcessId) -> bool {
-        self.runtime_processes.contains(process)
     }
 
     fn runtime_satisfy(
