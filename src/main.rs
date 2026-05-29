@@ -10,6 +10,7 @@ mod types;
 use executor::ExecutorHandle;
 use manager::ManagerHandle;
 use proc::http::HttpHandle;
+use proc::http_server::HttpServerHandle;
 use scheduler::{InMemoryScheduler, Proposal, SchedulerHandle, run_scheduler};
 use state::{InMemoryKVState, StateHandle};
 use store::{InMemoryPackageStore, StoreHandle};
@@ -77,11 +78,14 @@ async fn main() {
     let http_process = ProcessId {
         namespace: "sys".to_string(),
         app: "http".to_string(),
-        proc: "runtime".to_string(),
+        proc: "entrypoint".to_string(),
     };
 
     let http = HttpHandle::new(scheduler.clone());
     manager.register_runtime(http_process.clone(), http.sender());
+
+    // Start HTTP server on port 6202
+    let _http_server = HttpServerHandle::new(scheduler.clone(), 6202).await;
 
     // Submit initial proposals via scheduler
 

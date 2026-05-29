@@ -579,7 +579,7 @@ async fn test_runtime_satisfy_resolves_promise() {
     let runtime_proc = ProcessId {
         namespace: "sys".into(),
         app: "http".into(),
-        proc: "runtime".into(),
+        proc: "entrypoint".into(),
     };
     let caller_event = EventId {
         namespace: "test".into(),
@@ -593,7 +593,7 @@ async fn test_runtime_satisfy_resolves_promise() {
         scheduler.clone(),
         state.clone(),
         r#"return function(v)
-            return call("^sys/http/runtime", "https://example.com")
+            return call("^sys/http", "https://example.com")
         end"#
             .to_string(),
     );
@@ -674,7 +674,7 @@ async fn test_http_client_get() {
     let http_process = ProcessId {
         namespace: "sys".into(),
         app: "http".into(),
-        proc: "runtime".into(),
+        proc: "entrypoint".into(),
     };
     manager.register_runtime(http_process.clone(), http.sender());
 
@@ -695,7 +695,7 @@ async fn test_http_client_get() {
         scheduler.clone(),
         state.clone(),
         r#"return function(v)
-            return call("^sys/http/runtime", v)
+            return call("^sys/http", v)
         end"#
             .to_string(),
     );
@@ -769,7 +769,7 @@ async fn test_http_client_post() {
     let http_process = ProcessId {
         namespace: "sys".into(),
         app: "http".into(),
-        proc: "runtime".into(),
+        proc: "entrypoint".into(),
     };
     manager.register_runtime(http_process.clone(), http.sender());
 
@@ -790,7 +790,7 @@ async fn test_http_client_post() {
         scheduler.clone(),
         state.clone(),
         r#"return function(v)
-            return call("^sys/http/runtime", v)
+            return call("^sys/http", v)
         end"#
             .to_string(),
     );
@@ -820,4 +820,93 @@ async fn test_http_client_post() {
     let body: serde_json::Value =
         serde_json::from_str(response["data"]["body"].as_str().unwrap()).unwrap();
     assert_eq!(body["hello"], "world");
+}
+
+// --- Test 10: HTTP server routes POST to process ---
+
+#[tokio::test]
+async fn test_http_server_routes_to_executor() {
+    use arcanum::proc::http_server::HttpServerHandle;
+
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
+    let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _server = HttpServerHandle::from_listener(scheduler.clone(), listener);
+
+    // Register a simple echo executor
+    let process = ProcessId {
+        namespace: "test".into(),
+        app: "echo".into(),
+        proc: "entrypoint".into(),
+    };
+
+    let executor = ExecutorHandle::new(
+        process.clone(),
+        scheduler.clone(),
+        state.clone(),
+        r#"return function(v)
+            return "echo: " .. v
+        end"#
+            .to_string(),
+    );
+    manager.register_executor(process.clone(), executor.sender());
+
+    // Send HTTP request to the server
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/test/echo/entrypoint", port))
+        .body("hello")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    let body_text = resp.text().await.unwrap();
+    let body: serde_json::Value = serde_json::from_str(&body_text).unwrap();
+    assert_eq!(body["data"], "echo: hello");
+}
+
+// --- Test 11: HTTP server error for unknown process ---
+
+#[tokio::test]
+async fn test_http_server_unknown_process() {
+    use arcanum::proc::http_server::HttpServerHandle;
+
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
+    let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let _server = HttpServerHandle::from_listener(scheduler.clone(), listener);
+
+    // No executor registered for the target process
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/test/nonexistent/foo", port))
+        .body("hello")
+        .send()
+        .await
+        .unwrap();
+
+    // The HTTP server times out since no executor consumes the proposal
+    assert_eq!(resp.status(), 504);
 }
