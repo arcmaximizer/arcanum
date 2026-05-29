@@ -53,6 +53,20 @@ async fn parse_syscall(
                 .unwrap_or_default();
             Syscall::KVWrite { key, new_value }
         }
+        "sql_exec" => {
+            let sql: String = args
+                .as_ref()
+                .and_then(|a| a.get(1).ok())
+                .unwrap_or_default();
+            Syscall::SqlExec { sql }
+        }
+        "sql_query" => {
+            let sql: String = args
+                .as_ref()
+                .and_then(|a| a.get(1).ok())
+                .unwrap_or_default();
+            Syscall::SqlQuery { sql }
+        }
         "call" => {
             let target: String = args
                 .as_ref()
@@ -269,6 +283,16 @@ pub async fn run_executor(
                                 .await;
                             tracing::debug!("event={} KVWrite: state updated", event);
                             input = mlua::Value::Nil;
+                        }
+                        Syscall::SqlExec { sql } => {
+                            tracing::debug!("event={} SqlExec: sql={}", event, sql);
+                            let result = state.sql_exec(process.clone(), sql).await;
+                            input = bytes_to_mlua_value(&lua, &result);
+                        }
+                        Syscall::SqlQuery { sql } => {
+                            tracing::debug!("event={} SqlQuery: sql={}", event, sql);
+                            let result = state.sql_query(process.clone(), sql).await;
+                            input = bytes_to_mlua_value(&lua, &result);
                         }
                         Syscall::Notify { proposal, .. } => {
                             tracing::debug!(

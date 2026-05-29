@@ -14,6 +14,24 @@ function kv.set(key, value)
     return syscall("kv_set", key, value)
 end
 
+local sql = {}
+
+function sql.exec(stmt)
+    local result = syscall("sql_exec", stmt)
+    if type(result) == "table" and result.error ~= nil then
+        error(result.error)
+    end
+    return result
+end
+
+function sql.query(stmt)
+    local result = syscall("sql_query", stmt)
+    if type(result) == "table" and result.error ~= nil then
+        error(result.error)
+    end
+    return result
+end
+
 local http = {}
 
 function http.get(target, ...)
@@ -57,6 +75,7 @@ end
 
 rawset(_G, "http", http)
 rawset(_G, "kv", kv)
+rawset(_G, "sql", sql)
 rawset(_G, "call", call)
 rawset(_G, "notify", notify)
 rawset(_G, "coroutine", nil)

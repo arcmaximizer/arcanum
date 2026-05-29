@@ -37,6 +37,12 @@ impl HttpServerHandle {
         tokio::spawn(run_from_listener(scheduler, listener));
         Self { port }
     }
+
+    pub fn from_listener(scheduler: SchedulerHandle, listener: tokio::net::TcpListener) -> Self {
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(run_from_listener(scheduler, listener));
+        Self { port }
+    }
 }
 
 async fn run_from_listener(scheduler: SchedulerHandle, listener: tokio::net::TcpListener) {

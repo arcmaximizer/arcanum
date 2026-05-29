@@ -135,10 +135,10 @@ async fn test_basic_return() {
     assert!(scheduler.get_next(process.clone()).await.is_none());
 }
 
-// --- Test 2: KV get ---
+// --- Test 2: KV + SQL combined ---
 
 #[tokio::test]
-async fn test_kv_get() {
+async fn test_kv_and_sql() {
     let (sched_tx, sched_rx) = mpsc::unbounded_channel();
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let state = StateHandle::new(InMemoryKVState::new());
@@ -153,12 +153,12 @@ async fn test_kv_get() {
     let process = ProcessId {
         namespace: "test".into(),
         app: "test".into(),
-        proc: "kvtest".into(),
+        proc: "kvsqltest".into(),
     };
     let event = EventId {
         namespace: "test".into(),
         app: "test".into(),
-        proc: "kvtest".into(),
+        proc: "kvsqltest".into(),
         seq: 0,
     };
 
@@ -167,8 +167,12 @@ async fn test_kv_get() {
         scheduler.clone(),
         state.clone(),
         r#"return function()
+            kv.set('mykey', 'myvalue')
             local v = kv.get('mykey')
-            return v
+            sql.exec("CREATE TABLE IF NOT EXISTS t (msg TEXT)")
+            sql.exec("INSERT INTO t VALUES ('hello')")
+            local r = sql.query("SELECT msg FROM t")
+            return {kv = v, sql = r}
         end"#
             .to_string(),
     );
@@ -183,24 +187,80 @@ async fn test_kv_get() {
         })
         .await;
 
-    let chunks = wait_for_chunks(&scheduler, event, 2, Duration::from_secs(2)).await;
-    assert_eq!(chunks.len(), 2);
+    let chunks = wait_for_chunks(&scheduler, event, 6, Duration::from_secs(2)).await;
+    assert_eq!(chunks.len(), 6);
 
-    // First: KVRead syscall (intermediate)
+    // Chunk 0: KVWrite syscall
     assert_eq!(chunks[0].status, RuntimeStatus::Normal);
+    assert_eq!(chunks[0].in_event_seq, 0);
     assert_eq!(chunks[0].returns, Vec::<u8>::new());
     assert_eq!(
         chunks[0].syscalls,
-        vec![Syscall::KVRead {
+        vec![Syscall::KVWrite {
             key: "mykey".to_string(),
-            current_value: String::new(),
+            new_value: "myvalue".to_string(),
         }]
     );
 
-    // Second: return "" (empty kv_state cache)
-    assert_eq!(chunks[1].status, RuntimeStatus::End);
-    assert_eq!(chunks[1].returns, mp_data(""));
-    assert_eq!(chunks[1].syscalls, vec![]);
+    // Chunk 1: KVRead syscall
+    assert_eq!(chunks[1].status, RuntimeStatus::Normal);
+    assert_eq!(chunks[1].in_event_seq, 1);
+    assert_eq!(chunks[1].returns, Vec::<u8>::new());
+    assert_eq!(
+        chunks[1].syscalls,
+        vec![Syscall::KVRead {
+            key: "mykey".to_string(),
+            current_value: "myvalue".to_string(),
+        }]
+    );
+
+    // Chunk 2: SqlExec syscall (CREATE TABLE)
+    assert_eq!(chunks[2].status, RuntimeStatus::Normal);
+    assert_eq!(chunks[2].in_event_seq, 2);
+    assert_eq!(chunks[2].returns, Vec::<u8>::new());
+    assert_eq!(
+        chunks[2].syscalls,
+        vec![Syscall::SqlExec {
+            sql: "CREATE TABLE IF NOT EXISTS t (msg TEXT)".to_string(),
+        }]
+    );
+
+    // Chunk 3: SqlExec syscall (INSERT)
+    assert_eq!(chunks[3].status, RuntimeStatus::Normal);
+    assert_eq!(chunks[3].in_event_seq, 3);
+    assert_eq!(chunks[3].returns, Vec::<u8>::new());
+    assert_eq!(
+        chunks[3].syscalls,
+        vec![Syscall::SqlExec {
+            sql: "INSERT INTO t VALUES ('hello')".to_string(),
+        }]
+    );
+
+    // Chunk 4: SqlQuery syscall
+    assert_eq!(chunks[4].status, RuntimeStatus::Normal);
+    assert_eq!(chunks[4].in_event_seq, 4);
+    assert_eq!(chunks[4].returns, Vec::<u8>::new());
+    assert_eq!(
+        chunks[4].syscalls,
+        vec![Syscall::SqlQuery {
+            sql: "SELECT msg FROM t".to_string(),
+        }]
+    );
+
+    // Chunk 5: End — final Lua return
+    assert_eq!(chunks[5].status, RuntimeStatus::End);
+    assert_eq!(chunks[5].in_event_seq, 5);
+    assert_eq!(chunks[5].syscalls, vec![]);
+    let expected = msgpack_value(&serde_json::json!({
+        "data": {
+            "kv": "myvalue",
+            "sql": {
+                "rows": [{"msg": "hello"}],
+                "columns": ["msg"]
+            }
+        }
+    }));
+    assert_eq!(chunks[5].returns, expected);
 }
 
 // --- Test 3: Lua error ---

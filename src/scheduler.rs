@@ -272,6 +272,8 @@ pub struct Receipt {
 pub enum Syscall {
     KVRead { key: String, current_value: String },
     KVWrite { key: String, new_value: String },
+    SqlExec { sql: String },
+    SqlQuery { sql: String },
     Call { proposal: Proposal },
     Notify { proposal: Proposal },
 }
