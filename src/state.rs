@@ -104,18 +104,13 @@ fn sqlite_value_to_json(value: rusqlite::types::Value) -> serde_json::Value {
         rusqlite::types::Value::Text(s) => serde_json::Value::String(s),
         rusqlite::types::Value::Blob(b) => serde_json::Value::Array(
             b.into_iter()
-                .map(|byte| {
-                    serde_json::Value::Number(serde_json::Number::from(byte as i64))
-                })
+                .map(|byte| serde_json::Value::Number(serde_json::Number::from(byte as i64)))
                 .collect(),
         ),
     }
 }
 
-pub async fn run_state(
-    mut rx: mpsc::UnboundedReceiver<StateMsg>,
-    mut state: InMemoryKVState,
-) {
+pub async fn run_state(mut rx: mpsc::UnboundedReceiver<StateMsg>, mut state: InMemoryKVState) {
     let mut sqlite_dbs: HashMap<ProcessId, rusqlite::Connection> = HashMap::new();
 
     while let Some(msg) = rx.recv().await {

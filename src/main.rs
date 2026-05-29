@@ -84,8 +84,8 @@ async fn main() {
     let http = HttpHandle::new(scheduler.clone());
     manager.register_stateless(http_process.clone(), http.sender());
 
-    // Start HTTP server on port 6202
-    let _http_server = HttpServerHandle::new(scheduler.clone(), 6202).await;
+    // Start HTTP server on port 6202 (registers as ^sys/http-server)
+    let _http_server = HttpServerHandle::new(scheduler.clone(), manager.clone(), 6202).await;
 
     // Submit initial proposals via scheduler
 

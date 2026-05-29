@@ -61,7 +61,9 @@ impl ManagerHandle {
     }
 
     pub fn unregister_stateless(&self, process: ProcessId) {
-        let _ = self.sender.send(ManagerMsg::UnregisterStateless { process });
+        let _ = self
+            .sender
+            .send(ManagerMsg::UnregisterStateless { process });
     }
 
     pub fn route_proposal(&self, proposal: Proposal) {

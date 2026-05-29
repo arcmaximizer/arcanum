@@ -1,15 +1,19 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
     Router,
     body::Bytes,
-    extract::{Path, State},
+    extract::State,
+    http::HeaderMap,
     response::{IntoResponse, Response},
     routing::post,
 };
 use reqwest::StatusCode;
+use tokio::sync::{RwLock, mpsc};
 
 use crate::{
+    manager::{ManagerHandle, StatelessCall},
     scheduler::{Proposal, RuntimeStatus, SchedulerHandle},
     types::ProcessId,
 };
@@ -24,56 +28,158 @@ fn body_to_msgpack(body: &[u8]) -> Vec<u8> {
     }
 }
 
+fn encode_response(value: &serde_json::Value) -> Vec<u8> {
+    let wrapped = serde_json::json!({ "data": value });
+    rmp_serde::to_vec(&wrapped).unwrap_or_default()
+}
+
+#[derive(Clone)]
+struct AppState {
+    scheduler: SchedulerHandle,
+    routes: Arc<RwLock<Vec<(String, ProcessId)>>>,
+}
+
 pub struct HttpServerHandle {
     pub port: u16,
 }
 
 impl HttpServerHandle {
-    pub async fn new(scheduler: SchedulerHandle, port: u16) -> Self {
-        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
+    pub async fn new(scheduler: SchedulerHandle, manager: ManagerHandle, port: u16) -> Self {
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
             .await
             .expect("failed to bind HTTP server port");
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(run_from_listener(scheduler, listener));
+        Self::from_listener_with_manager(scheduler, manager, listener)
+    }
+
+    fn from_listener_with_manager(
+        scheduler: SchedulerHandle,
+        manager: ManagerHandle,
+        listener: tokio::net::TcpListener,
+    ) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let port = listener.local_addr().unwrap().port();
+
+        let process = ProcessId {
+            namespace: "sys".into(),
+            app: "http-server".into(),
+            proc: "entrypoint".into(),
+        };
+        manager.register_stateless(process, tx);
+
+        tokio::spawn(run(listener, rx, scheduler));
         Self { port }
     }
 
     pub fn from_listener(scheduler: SchedulerHandle, listener: tokio::net::TcpListener) -> Self {
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(run_from_listener(scheduler, listener));
+        let (_tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(run(listener, rx, scheduler));
         Self { port }
     }
 }
 
-async fn run_from_listener(scheduler: SchedulerHandle, listener: tokio::net::TcpListener) {
-    let addr = listener.local_addr().unwrap();
-    let app = Router::new()
-        .route("/{namespace}/{app}/{*proc}", post(handle_request))
-        .with_state(scheduler);
+async fn run(
+    listener: tokio::net::TcpListener,
+    mut rx: mpsc::UnboundedReceiver<StatelessCall>,
+    scheduler: SchedulerHandle,
+) {
+    let routes: Arc<RwLock<Vec<(String, ProcessId)>>> = Arc::new(RwLock::new(Vec::new()));
 
-    tracing::info!("HTTP server listening on {}", addr);
+    let state = AppState {
+        scheduler: scheduler.clone(),
+        routes: routes.clone(),
+    };
+
+    let app = Router::new()
+        .route("/{*path}", post(handle_request))
+        .with_state(state);
+
+    tokio::spawn(handle_process_messages(
+        rx,
+        scheduler.clone(),
+        routes.clone(),
+    ));
+
     axum::serve(listener, app).await.unwrap();
 }
 
+async fn handle_process_messages(
+    mut rx: mpsc::UnboundedReceiver<StatelessCall>,
+    scheduler: SchedulerHandle,
+    routes: Arc<RwLock<Vec<(String, ProcessId)>>>,
+) {
+    while let Some(call) = rx.recv().await {
+        let input: serde_json::Value = match rmp_serde::from_slice(&call.proposal.input) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let action = input["action"].as_str().unwrap_or("");
+
+        let result = match action {
+            "add" => {
+                let app_str = input["app"].as_str().unwrap_or("");
+                let host = input["host"].as_str().unwrap_or("");
+                match ProcessId::try_from(app_str) {
+                    Ok(pid) => {
+                        routes.write().await.push((host.to_string(), pid));
+                        serde_json::json!({"ok": true})
+                    }
+                    Err(_) => {
+                        serde_json::json!({"error": format!("invalid process: {}", app_str)})
+                    }
+                }
+            }
+            "list-uris" => {
+                let app_str = input["app"].as_str().unwrap_or("");
+                let uris: Vec<String> = if let Ok(pid) = ProcessId::try_from(app_str) {
+                    routes
+                        .read()
+                        .await
+                        .iter()
+                        .filter(|(_, p)| p == &pid)
+                        .map(|(host, _)| host.clone())
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                serde_json::json!({"uris": uris})
+            }
+            _ => serde_json::json!({"error": format!("unknown action: {}", action)}),
+        };
+
+        let _ = scheduler
+            .stateless_satisfy(call.proposal, encode_response(&result))
+            .await;
+    }
+}
+
 async fn handle_request(
-    State(scheduler): State<SchedulerHandle>,
-    Path((namespace, app, proc_path)): Path<(String, String, String)>,
+    State(state): State<AppState>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let proc = if proc_path.is_empty() || proc_path == "/" {
-        "entrypoint".to_string()
-    } else {
-        proc_path.trim_start_matches('/').to_string()
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let process = {
+        let routes = state.routes.read().await;
+        routes
+            .iter()
+            .find(|(h, _)| h == &host)
+            .map(|(_, p)| p.clone())
     };
 
-    let process = ProcessId {
-        namespace,
-        app,
-        proc,
+    let process = match process {
+        Some(p) => p,
+        None => return (StatusCode::NOT_FOUND, "no route for host").into_response(),
     };
 
-    let event = scheduler.get_next_event_id(process.clone()).await;
-
+    let event = state.scheduler.get_next_event_id(process.clone()).await;
     let input = body_to_msgpack(&body);
 
     let proposal = Proposal {
@@ -83,7 +189,7 @@ async fn handle_request(
         promise: None,
     };
 
-    scheduler.add_proposal(proposal).await;
+    state.scheduler.add_proposal(proposal).await;
 
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(30);
@@ -93,7 +199,7 @@ async fn handle_request(
             return (StatusCode::GATEWAY_TIMEOUT, "timeout").into_response();
         }
 
-        if let Some(chunks) = scheduler.get_chunks(event.clone()).await {
+        if let Some(chunks) = state.scheduler.get_chunks(event.clone()).await {
             if let Some(last) = chunks.last() {
                 match last.status {
                     RuntimeStatus::End => {

@@ -882,10 +882,10 @@ async fn test_http_client_post() {
     assert_eq!(body["hello"], "world");
 }
 
-// --- Test 10: HTTP server routes POST to process ---
+// --- Test 10: HTTP server routes by Host header to executor ---
 
 #[tokio::test]
-async fn test_http_server_routes_to_executor() {
+async fn test_http_server_routes_by_host_header() {
     use arcanum::proc::http_server::HttpServerHandle;
 
     let (sched_tx, sched_rx) = mpsc::unbounded_channel();
@@ -899,9 +899,8 @@ async fn test_http_server_routes_to_executor() {
         manager.clone(),
     ));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let _server = HttpServerHandle::from_listener(scheduler.clone(), listener);
+    let server = HttpServerHandle::new(scheduler.clone(), manager.clone(), 0).await;
+    let port = server.port;
 
     // Register a simple echo executor
     let process = ProcessId {
@@ -921,25 +920,47 @@ async fn test_http_server_routes_to_executor() {
     );
     manager.register_executor(process.clone(), executor.sender());
 
-    // Send HTTP request to the server
+    // Register host route via the http-server stateless handler
+    let http_server_proc = ProcessId {
+        namespace: "sys".into(),
+        app: "http-server".into(),
+        proc: "entrypoint".into(),
+    };
+
+    scheduler
+        .add_proposal(Proposal {
+            process: http_server_proc.clone(),
+            event: None,
+            input: msgpack_value(&serde_json::json!({
+                "action": "add",
+                "app": "test/echo",
+                "host": "example.com",
+            })),
+            promise: None,
+        })
+        .await;
+
+    wait_for_empty_schedule(&scheduler, &http_server_proc, Duration::from_secs(2)).await;
+
+    // Send HTTP request with Host header
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("http://127.0.0.1:{}/test/echo/entrypoint", port))
+        .post(format!("http://127.0.0.1:{}/any/path", port))
+        .header("Host", "example.com")
         .body("hello")
         .send()
         .await
         .unwrap();
 
     assert_eq!(resp.status(), 200);
-    let body_text = resp.text().await.unwrap();
-    let body: serde_json::Value = serde_json::from_str(&body_text).unwrap();
+    let body: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
     assert_eq!(body["data"], "echo: hello");
 }
 
-// --- Test 11: HTTP server error for unknown process ---
+// --- Test 11: HTTP server returns 404 for unregistered host ---
 
 #[tokio::test]
-async fn test_http_server_unknown_process() {
+async fn test_http_server_unknown_host() {
     use arcanum::proc::http_server::HttpServerHandle;
 
     let (sched_tx, sched_rx) = mpsc::unbounded_channel();
@@ -953,20 +974,17 @@ async fn test_http_server_unknown_process() {
         manager.clone(),
     ));
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let _server = HttpServerHandle::from_listener(scheduler.clone(), listener);
-
-    // No executor registered for the target process
+    let server = HttpServerHandle::new(scheduler.clone(), manager.clone(), 0).await;
+    let port = server.port;
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("http://127.0.0.1:{}/test/nonexistent/foo", port))
+        .post(format!("http://127.0.0.1:{}/any/path", port))
+        .header("Host", "unknown.example.com")
         .body("hello")
         .send()
         .await
         .unwrap();
 
-    // The HTTP server times out since no executor consumes the proposal
-    assert_eq!(resp.status(), 504);
+    assert_eq!(resp.status(), 404);
 }
