@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use arcanum::executor::ExecutorHandle;
 use arcanum::manager::ManagerHandle;
+use arcanum::proc::http::HttpHandle;
 use arcanum::scheduler::{
     InMemoryScheduler, Proposal, Receipt, RuntimeStatus, SchedulerHandle, Syscall, run_scheduler,
 };
@@ -411,6 +412,150 @@ async fn test_call_with_promise_resolution() {
     assert_eq!(chunks_b[0].syscalls, vec![]);
 }
 
+// --- Test 7: Concurrent proposals to same process ---
+
+#[tokio::test]
+async fn test_concurrent_proposals_ordered() {
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
+    let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
+
+    let process = ProcessId {
+        namespace: "test".into(),
+        app: "test".into(),
+        proc: "counter".into(),
+    };
+    let event1 = EventId {
+        namespace: "test".into(),
+        app: "test".into(),
+        proc: "counter".into(),
+        seq: 0,
+    };
+    let event2 = EventId {
+        namespace: "test".into(),
+        app: "test".into(),
+        proc: "counter".into(),
+        seq: 1,
+    };
+
+    let executor = ExecutorHandle::new(
+        process.clone(),
+        scheduler.clone(),
+        state.clone(),
+        r#"return function(v)
+            local prev = kv.get('counter')
+            kv.set('counter', v)
+            return prev
+        end"#
+            .to_string(),
+    );
+    manager.register_executor(process.clone(), executor.sender());
+
+    // Set initial state
+    state
+        .set(process.clone(), "counter".into(), "0".into())
+        .await;
+
+    // Send two proposals back-to-back
+    scheduler
+        .add_proposal(Proposal {
+            process: process.clone(),
+            event: None,
+            input: mp("first"),
+            promise: None,
+        })
+        .await;
+    scheduler
+        .add_proposal(Proposal {
+            process: process.clone(),
+            event: None,
+            input: mp("second"),
+            promise: None,
+        })
+        .await;
+
+    // Both events should get 3 chunks: KVRead, KVWrite, End
+    let chunks1 = wait_for_chunks(&scheduler, event1, 3, Duration::from_secs(2)).await;
+    let chunks2 = wait_for_chunks(&scheduler, event2, 3, Duration::from_secs(2)).await;
+
+    assert_eq!(chunks1.len(), 3);
+    assert_eq!(chunks2.len(), 3);
+
+    // --- Event 1 (seq=0): reads initial "0", sets to "first", returns "0" ---
+
+    // Chunk 0: KVRead sees initial state
+    assert_eq!(chunks1[0].status, RuntimeStatus::Normal);
+    assert_eq!(
+        chunks1[0].syscalls,
+        vec![Syscall::KVRead {
+            key: "counter".into(),
+            current_value: "0".into(),
+        }]
+    );
+    assert_eq!(chunks1[0].returns, Vec::<u8>::new());
+    assert_eq!(chunks1[0].in_event_seq, 0);
+
+    // Chunk 1: KVWrite sets to "first"
+    assert_eq!(chunks1[1].status, RuntimeStatus::Normal);
+    assert_eq!(
+        chunks1[1].syscalls,
+        vec![Syscall::KVWrite {
+            key: "counter".into(),
+            new_value: "first".into(),
+        }]
+    );
+    assert_eq!(chunks1[1].returns, Vec::<u8>::new());
+    assert_eq!(chunks1[1].in_event_seq, 1);
+
+    // Chunk 2: End — returns prev ("0")
+    assert_eq!(chunks1[2].status, RuntimeStatus::End);
+    assert_eq!(chunks1[2].returns, mp_data("0"));
+    assert_eq!(chunks1[2].syscalls, vec![]);
+    assert_eq!(chunks1[2].in_event_seq, 2);
+
+    // --- Event 2 (seq=1): reads "first" (set by event 1), sets to "second", returns "first" ---
+
+    // Chunk 0: KVRead sees state after event 1
+    assert_eq!(chunks2[0].status, RuntimeStatus::Normal);
+    assert_eq!(
+        chunks2[0].syscalls,
+        vec![Syscall::KVRead {
+            key: "counter".into(),
+            current_value: "first".into(),
+        }]
+    );
+    assert_eq!(chunks2[0].returns, Vec::<u8>::new());
+    assert_eq!(chunks2[0].in_event_seq, 0);
+
+    // Chunk 1: KVWrite sets to "second"
+    assert_eq!(chunks2[1].status, RuntimeStatus::Normal);
+    assert_eq!(
+        chunks2[1].syscalls,
+        vec![Syscall::KVWrite {
+            key: "counter".into(),
+            new_value: "second".into(),
+        }]
+    );
+    assert_eq!(chunks2[1].returns, Vec::<u8>::new());
+    assert_eq!(chunks2[1].in_event_seq, 1);
+
+    // Chunk 2: End — returns prev ("first")
+    assert_eq!(chunks2[2].status, RuntimeStatus::End);
+    assert_eq!(chunks2[2].returns, mp_data("first"));
+    assert_eq!(chunks2[2].syscalls, vec![]);
+    assert_eq!(chunks2[2].in_event_seq, 2);
+
+    // Both proposals should be popped from schedule
+    assert!(scheduler.get_next(process.clone()).await.is_none());
+}
+
 // --- Test 6: Runtime satisfy ---
 
 #[tokio::test]
@@ -495,4 +640,184 @@ async fn test_runtime_satisfy_resolves_promise() {
     assert_eq!(chunks[1].status, RuntimeStatus::End);
     assert_eq!(chunks[1].returns, wrapped_response);
     assert_eq!(chunks[1].syscalls, vec![]);
+}
+
+// --- Test 8: HTTP client GET ---
+
+#[tokio::test]
+async fn test_http_client_get() {
+    use axum::{Json, Router, routing::get};
+
+    let app = Router::new().route(
+        "/json",
+        get(|| async { Json(serde_json::json!({"ok": true, "data": "hello"})) }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
+    let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
+
+    let http = HttpHandle::new(scheduler.clone());
+    let http_process = ProcessId {
+        namespace: "sys".into(),
+        app: "http".into(),
+        proc: "runtime".into(),
+    };
+    manager.register_runtime(http_process.clone(), http.sender());
+
+    let caller_proc = ProcessId {
+        namespace: "test".into(),
+        app: "test".into(),
+        proc: "caller".into(),
+    };
+    let caller_event = EventId {
+        namespace: "test".into(),
+        app: "test".into(),
+        proc: "caller".into(),
+        seq: 0,
+    };
+
+    let executor = ExecutorHandle::new(
+        caller_proc.clone(),
+        scheduler.clone(),
+        state.clone(),
+        r#"return function(v)
+            return call("^sys/http/runtime", v)
+        end"#
+            .to_string(),
+    );
+    manager.register_executor(caller_proc.clone(), executor.sender());
+
+    let input = msgpack_value(&serde_json::json!({
+        "method": "GET",
+        "url": format!("http://127.0.0.1:{}/json", addr.port()),
+    }));
+    scheduler
+        .add_proposal(Proposal {
+            process: caller_proc.clone(),
+            event: None,
+            input,
+            promise: None,
+        })
+        .await;
+
+    let chunks = wait_for_chunks(&scheduler, caller_event, 2, Duration::from_secs(5)).await;
+    assert_eq!(chunks.len(), 2);
+
+    assert_eq!(chunks[0].status, RuntimeStatus::Normal);
+    assert_eq!(chunks[0].in_event_seq, 0);
+    assert!(matches!(
+        &chunks[0].syscalls[0],
+        Syscall::Call { proposal } if proposal.process == http_process
+    ));
+
+    assert_eq!(chunks[1].status, RuntimeStatus::End);
+    assert_eq!(chunks[1].in_event_seq, 1);
+    assert_eq!(chunks[1].syscalls, vec![]);
+
+    let response: serde_json::Value = rmp_serde::from_slice(&chunks[1].returns).unwrap();
+    assert_eq!(response["data"]["ok"], true);
+    assert_eq!(response["data"]["status"], 200);
+    let body: serde_json::Value =
+        serde_json::from_str(response["data"]["body"].as_str().unwrap()).unwrap();
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["data"], "hello");
+}
+
+// --- Test 9: HTTP client POST with body ---
+
+#[tokio::test]
+async fn test_http_client_post() {
+    use axum::{Json, Router, routing::post};
+
+    let app = Router::new().route(
+        "/echo",
+        post(|body: Json<serde_json::Value>| async { body }),
+    );
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
+    let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
+
+    let http = HttpHandle::new(scheduler.clone());
+    let http_process = ProcessId {
+        namespace: "sys".into(),
+        app: "http".into(),
+        proc: "runtime".into(),
+    };
+    manager.register_runtime(http_process.clone(), http.sender());
+
+    let caller_proc = ProcessId {
+        namespace: "test".into(),
+        app: "test".into(),
+        proc: "caller".into(),
+    };
+    let caller_event = EventId {
+        namespace: "test".into(),
+        app: "test".into(),
+        proc: "caller".into(),
+        seq: 0,
+    };
+
+    let executor = ExecutorHandle::new(
+        caller_proc.clone(),
+        scheduler.clone(),
+        state.clone(),
+        r#"return function(v)
+            return call("^sys/http/runtime", v)
+        end"#
+            .to_string(),
+    );
+    manager.register_executor(caller_proc.clone(), executor.sender());
+
+    let input = msgpack_value(&serde_json::json!({
+        "method": "POST",
+        "url": format!("http://127.0.0.1:{}/echo", addr.port()),
+        "headers": {"content-type": "application/json"},
+        "body": "{\"hello\":\"world\"}",
+    }));
+    scheduler
+        .add_proposal(Proposal {
+            process: caller_proc.clone(),
+            event: None,
+            input,
+            promise: None,
+        })
+        .await;
+
+    let chunks = wait_for_chunks(&scheduler, caller_event, 2, Duration::from_secs(5)).await;
+    assert_eq!(chunks.len(), 2);
+
+    let response: serde_json::Value = rmp_serde::from_slice(&chunks[1].returns).unwrap();
+    assert_eq!(response["data"]["ok"], true);
+    assert_eq!(response["data"]["status"], 200);
+    let body: serde_json::Value =
+        serde_json::from_str(response["data"]["body"].as_str().unwrap()).unwrap();
+    assert_eq!(body["hello"], "world");
 }
