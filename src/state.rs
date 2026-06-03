@@ -29,7 +29,7 @@ pub enum StateMsg {
     },
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct StateHandle {
     sender: mpsc::UnboundedSender<StateMsg>,
 }
@@ -141,6 +141,91 @@ fn json_to_sqlite_value(value: serde_json::Value) -> rusqlite::types::Value {
         serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
             let bytes = rmp_serde::to_vec(&value).unwrap_or_default();
             rusqlite::types::Value::Blob(bytes)
+        }
+    }
+}
+
+/// Spawn a per-process state actor with its own KV store and SQLite database.
+/// This allows parallel state access across different processes.
+pub fn spawn_per_process_state() -> StateHandle {
+    let (sender, receiver) = mpsc::unbounded_channel();
+    tokio::spawn(run_per_process_state(receiver));
+    StateHandle { sender }
+}
+
+async fn run_per_process_state(mut rx: mpsc::UnboundedReceiver<StateMsg>) {
+    let mut kv: HashMap<String, String> = HashMap::new();
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            StateMsg::Set {
+                key, value, resp, ..
+            } => {
+                kv.insert(key, value);
+                let _ = resp.send(());
+            }
+            StateMsg::Get { key, resp, .. } => {
+                let value = kv.get(&key).cloned();
+                let _ = resp.send(value);
+            }
+            StateMsg::SqlExec {
+                sql, params, resp, ..
+            } => {
+                let sqlite_params = msgpack_params_to_sqlite(&params);
+                let result = conn.execute(&sql, rusqlite::params_from_iter(sqlite_params));
+                let response = match result {
+                    Ok(affected) => {
+                        let map = serde_json::json!({"affected": affected});
+                        rmp_serde::to_vec(&map).unwrap_or_default()
+                    }
+                    Err(e) => {
+                        let map = serde_json::json!({"error": e.to_string()});
+                        rmp_serde::to_vec(&map).unwrap_or_default()
+                    }
+                };
+                let _ = resp.send(response);
+            }
+            StateMsg::SqlQuery {
+                sql, params, resp, ..
+            } => {
+                let sqlite_params = msgpack_params_to_sqlite(&params);
+                let response = match conn.prepare(&sql) {
+                    Ok(mut stmt) => {
+                        let col_count = stmt.column_count();
+                        let col_names: Vec<String> = (0..col_count)
+                            .map(|i| stmt.column_name(i).unwrap().to_string())
+                            .collect();
+                        match stmt.query_map(rusqlite::params_from_iter(sqlite_params), |row| {
+                            let mut map = serde_json::Map::new();
+                            for (i, name) in col_names.iter().enumerate() {
+                                let val = row
+                                    .get::<_, rusqlite::types::Value>(i)
+                                    .unwrap_or(rusqlite::types::Value::Null);
+                                map.insert(name.clone(), sqlite_value_to_json(val));
+                            }
+                            Ok(serde_json::Value::Object(map))
+                        }) {
+                            Ok(mapped_rows) => {
+                                let rows: Vec<serde_json::Value> =
+                                    mapped_rows.filter_map(|r| r.ok()).collect();
+                                let result =
+                                    serde_json::json!({"rows": rows, "columns": col_names});
+                                rmp_serde::to_vec(&result).unwrap_or_default()
+                            }
+                            Err(e) => {
+                                let map = serde_json::json!({"error": e.to_string()});
+                                rmp_serde::to_vec(&map).unwrap_or_default()
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let map = serde_json::json!({"error": e.to_string()});
+                        rmp_serde::to_vec(&map).unwrap_or_default()
+                    }
+                };
+                let _ = resp.send(response);
+            }
         }
     }
 }

@@ -11,7 +11,6 @@ use manager::ManagerHandle;
 use proc::http::HttpHandle;
 use proc::http_server::HttpServerHandle;
 use scheduler::{InMemoryScheduler, Proposal, SchedulerHandle, run_scheduler};
-use state::{InMemoryKVState, StateHandle};
 use std::io::Write;
 use store::{InMemoryPackageStore, StoreHandle};
 use tokio::sync::mpsc;
@@ -52,9 +51,8 @@ async fn main() {
 
     let (sched_tx, sched_rx) = mpsc::unbounded_channel();
     let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone());
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),

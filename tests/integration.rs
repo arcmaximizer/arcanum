@@ -6,14 +6,12 @@ use arcanum::proc::http::HttpHandle;
 use arcanum::scheduler::{
     InMemoryScheduler, Proposal, Receipt, RuntimeStatus, SchedulerHandle, Syscall, run_scheduler,
 };
-use arcanum::state::{InMemoryKVState, StateHandle};
 use arcanum::store::{InMemoryPackageStore, StoreHandle};
 use arcanum::types::{EventId, ProcessId};
 use tokio::sync::mpsc;
 
 struct TestEnv {
     scheduler: SchedulerHandle,
-    state: StateHandle,
     store: StoreHandle,
     manager: ManagerHandle,
 }
@@ -21,9 +19,8 @@ struct TestEnv {
 fn setup() -> TestEnv {
     let (sched_tx, sched_rx) = mpsc::unbounded_channel();
     let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone());
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),
@@ -31,7 +28,6 @@ fn setup() -> TestEnv {
     ));
     TestEnv {
         scheduler,
-        state,
         store,
         manager,
     }
@@ -521,8 +517,10 @@ async fn test_concurrent_proposals_ordered() {
     )
     .await;
 
-    // Set initial state
-    env.state
+    // Set initial state via per-process state actor
+    env.manager
+        .get_state_handle(process.clone())
+        .await
         .set(process.clone(), "counter".into(), "0".into())
         .await;
 

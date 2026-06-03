@@ -1,10 +1,10 @@
 use crate::executor::ExecutorHandle;
 use crate::scheduler::{Proposal, SchedulerHandle};
-use crate::state::StateHandle;
+use crate::state::{StateHandle, spawn_per_process_state};
 use crate::store::StoreHandle;
 use crate::types::{AppId, HandlerId, ProcessId};
 use std::collections::HashMap;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Clone)]
 pub struct StatelessCall {
@@ -37,6 +37,10 @@ pub enum ManagerMsg {
     RouteProposal {
         proposal: Proposal,
     },
+    GetStateHandle {
+        process: ProcessId,
+        resp: oneshot::Sender<StateHandle>,
+    },
 }
 
 #[derive(Clone)]
@@ -45,16 +49,10 @@ pub struct ManagerHandle {
 }
 
 impl ManagerHandle {
-    pub fn new(store: StoreHandle, scheduler: SchedulerHandle, state: StateHandle) -> Self {
+    pub fn new(store: StoreHandle, scheduler: SchedulerHandle) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let handle = Self { sender };
-        tokio::spawn(run_manager(
-            receiver,
-            store,
-            scheduler,
-            state,
-            handle.clone(),
-        ));
+        tokio::spawn(run_manager(receiver, store, scheduler, handle.clone()));
         handle
     }
 
@@ -95,19 +93,30 @@ impl ManagerHandle {
     pub fn route_proposal(&self, proposal: Proposal) {
         let _ = self.sender.send(ManagerMsg::RouteProposal { proposal });
     }
+
+    pub async fn get_state_handle(&self, process: ProcessId) -> StateHandle {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ManagerMsg::GetStateHandle {
+                process,
+                resp: resp_tx,
+            })
+            .expect("Manager task has been killed");
+        resp_rx.await.expect("Manager task has been killed")
+    }
 }
 
 pub async fn run_manager(
     mut rx: mpsc::UnboundedReceiver<ManagerMsg>,
     store: StoreHandle,
     scheduler: SchedulerHandle,
-    state: StateHandle,
     manager: ManagerHandle,
 ) {
     let mut executor_senders: HashMap<ProcessId, mpsc::UnboundedSender<Proposal>> = HashMap::new();
     let mut stateless_senders: HashMap<ProcessId, mpsc::UnboundedSender<StatelessCall>> =
         HashMap::new();
     let mut handler_map: HashMap<ProcessId, HandlerId> = HashMap::new();
+    let mut state_actors: HashMap<ProcessId, StateHandle> = HashMap::new();
 
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -135,15 +144,22 @@ pub async fn run_manager(
                 );
                 handler_map.insert(process, handler);
             }
+            ManagerMsg::GetStateHandle { process, resp } => {
+                let handle = state_actors
+                    .entry(process)
+                    .or_insert_with(spawn_per_process_state)
+                    .clone();
+                let _ = resp.send(handle);
+            }
             ManagerMsg::SpawnActor { process } => {
                 tracing::info!("manager: spawning actor for {}", process);
                 spawn_actor(
                     &process,
                     &mut executor_senders,
                     &handler_map,
+                    &mut state_actors,
                     &store,
                     &scheduler,
-                    &state,
                     &manager,
                 )
                 .await;
@@ -166,9 +182,9 @@ pub async fn run_manager(
                     process,
                     &mut executor_senders,
                     &handler_map,
+                    &mut state_actors,
                     &store,
                     &scheduler,
-                    &state,
                     &manager,
                 )
                 .await
@@ -191,9 +207,9 @@ async fn spawn_actor(
     process: &ProcessId,
     executor_senders: &mut HashMap<ProcessId, mpsc::UnboundedSender<Proposal>>,
     handler_map: &HashMap<ProcessId, HandlerId>,
+    state_actors: &mut HashMap<ProcessId, StateHandle>,
     store: &StoreHandle,
     scheduler: &SchedulerHandle,
-    state: &StateHandle,
     manager: &ManagerHandle,
 ) -> bool {
     let handler = handler_map.get(process).cloned();
@@ -210,10 +226,14 @@ async fn spawn_actor(
     match store.get_asset_by_name(app_id, "main.lua".into()).await {
         Some(code_bytes) => {
             let code = String::from_utf8_lossy(&code_bytes).into_owned();
+            let process_state = state_actors
+                .entry(process.clone())
+                .or_insert_with(spawn_per_process_state)
+                .clone();
             let handle = ExecutorHandle::new(
                 process.clone(),
                 scheduler.clone(),
-                state.clone(),
+                process_state,
                 manager.clone(),
                 store.clone(),
                 code,
