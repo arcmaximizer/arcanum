@@ -24,7 +24,7 @@ pub enum ManagerMsg {
         process: ProcessId,
         tx: mpsc::UnboundedSender<StatelessCall>,
     },
-    UnregisterStateless {
+    DeregisterStateless {
         process: ProcessId,
     },
     RegisterProcess {
@@ -76,10 +76,10 @@ impl ManagerHandle {
             .send(ManagerMsg::RegisterStateless { process, tx });
     }
 
-    pub fn unregister_stateless(&self, process: ProcessId) {
+    pub fn deregister_stateless(&self, process: ProcessId) {
         let _ = self
             .sender
-            .send(ManagerMsg::UnregisterStateless { process });
+            .send(ManagerMsg::DeregisterStateless { process });
     }
 
     pub fn register_process(&self, process: ProcessId, handler: HandlerId) {
@@ -123,8 +123,8 @@ pub async fn run_manager(
                 tracing::debug!("manager: registered stateless {}", process);
                 stateless_senders.insert(process, tx);
             }
-            ManagerMsg::UnregisterStateless { process } => {
-                tracing::debug!("manager: unregistered stateless {}", process);
+            ManagerMsg::DeregisterStateless { process } => {
+                tracing::debug!("manager: deregistered stateless {}", process);
                 stateless_senders.remove(&process);
             }
             ManagerMsg::RegisterProcess { process, handler } => {
