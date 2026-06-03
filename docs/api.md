@@ -108,10 +108,12 @@ runtime resolves them immediately from the in-memory state.
 Arcanum ships with a built-in HTTP client. Calls are routed through `^sys/http`.
 
 ```lua
-http.get("https://api.example.com/data")
-http.post("https://api.example.com/data", json_body)
-http.put("https://api.example.com/data", json_body)
-http.delete("https://api.example.com/data")
+-- Options is optional
+
+http.get("https://api.example.com/data", options)
+http.post("https://api.example.com/data", options)
+http.put("https://api.example.com/data", options)
+http.delete("https://api.example.com/data", options)
 http.request("https://api.example.com/data", "patch", options)
 ```
 
@@ -223,13 +225,13 @@ type ArcnetMessage = {
 
 ## HTTP Server
 
-Arcanum's built-in HTTP server listens on port 6202. Processes can register
-URI bindings via the shell:
+Arcanum's built-in HTTP server listens on port 6202. Users can register URI
+bindings via the shell:
 
 ```
-arcanum > sys/http-server add arc/forum forum.example.org
-arcanum > sys/http-server remove arc/forum forum.example.org
-arcanum > sys/http-server list-uris arc/forum
+^arc: sys/http-server add arc/forum forum.example.org
+^arc: sys/http-server remove arc/forum forum.example.org
+^arc: sys/http-server list-uris arc/forum
 ```
 
 Processes may also register URI bindings programmatically at runtime.

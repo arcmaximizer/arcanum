@@ -4,7 +4,7 @@ use crate::{
     state::StateHandle,
     types,
 };
-use mlua::{Lua, ThreadStatus};
+use mlua::{Lua, ThreadStatus, Value as LuaValue};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tracing;
@@ -128,6 +128,30 @@ fn is_non_blocking(syscall: &Syscall) -> bool {
     matches!(syscall, Syscall::Call { .. })
 }
 
+fn make_context(lua: &Lua, proposal: &Proposal) -> mlua::Result<LuaValue> {
+    let ctx = lua.create_table()?;
+
+    let from = proposal
+        .promise
+        .as_ref()
+        .map(|p| p.target.to_string())
+        .unwrap_or_default();
+    ctx.set("from", from)?;
+
+    let me_str = proposal.process.to_string();
+    ctx.set("me", me_str.clone())?;
+    ctx.set("self", me_str.clone())?;
+    ctx.set("process", me_str.clone())?;
+    ctx.set("proc", me_str.clone())?;
+
+    ctx.set("handler", proposal.process.proc.clone())?;
+
+    let app_id: String = types::AppId::from(&proposal.process).into();
+    ctx.set("app", app_id)?;
+
+    Ok(LuaValue::Table(ctx))
+}
+
 pub struct ExecutorHandle {
     sender: mpsc::UnboundedSender<Proposal>,
     process: types::ProcessId,
@@ -215,12 +239,13 @@ pub async fn run_executor(
             let log_seq = scheduler.get_log_seq(process.clone()).await;
             tracing::debug!("event={} Got log_seq={}", event, log_seq);
 
-            tracing::debug!(
-                "event={} Resuming Lua thread with input={:#?}",
-                event,
-                input
-            );
-            match thread.resume::<mlua::Value>(input.clone()) {
+            let resume_result = if in_event_seq == 0 {
+                let ctx = make_context(&lua, &proposal).unwrap();
+                thread.resume::<mlua::Value>((ctx, input.clone()))
+            } else {
+                thread.resume::<mlua::Value>(input.clone())
+            };
+            match resume_result {
                 Ok(mlua::Value::Table(table)) if thread.status() == ThreadStatus::Resumable => {
                     tracing::debug!("event={} Got syscall from Lua", event);
                     tracing::debug!(

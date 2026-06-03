@@ -66,7 +66,7 @@ async fn main() {
         &store,
         "arc",
         "echo",
-        r#"return function(value)
+        r#"return function(ctx, value)
         return value
     end"#,
     )
@@ -76,7 +76,7 @@ async fn main() {
         &store,
         "arc",
         "hello",
-        r#"return function(value)
+        r#"return function(ctx, value)
         return call("^arc/echo/entrypoint", { message = "Hello world!" })
     end"#,
     )

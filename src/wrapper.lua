@@ -34,24 +34,37 @@ end
 
 local http = {}
 
-function http.get(target, ...)
-    return call("sys/http", "get", target, ...)
+local function http_request(method, url, options)
+    options = options or {}
+    local req = {
+        method = method,
+        url = url,
+        headers = options.headers,
+        query = options.query,
+        body = options.body,
+        timeoutMs = options.timeoutMs,
+    }
+    return call("^sys/http", req)
 end
 
-function http.post(target, ...)
-    return call("sys/http", "post", target, ...)
+function http.get(url, options)
+    return http_request("GET", url, options)
 end
 
-function http.put(target, ...)
-    return call("sys/http", "put", target, ...)
+function http.post(url, options)
+    return http_request("POST", url, options)
 end
 
-function http.delete(target, ...)
-    return call("sys/http", "delete", target, ...)
+function http.put(url, options)
+    return http_request("PUT", url, options)
 end
 
-function http.request(target, verb, ...)
-    return call("sys/http", verb, target, ...)
+function http.delete(url, options)
+    return http_request("DELETE", url, options)
+end
+
+function http.request(url, verb, options)
+    return http_request(string.upper(verb), url, options)
 end
 
 local function call(target, ...)
