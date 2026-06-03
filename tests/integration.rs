@@ -153,7 +153,7 @@ async fn test_basic_return() {
         &env.store,
         "test",
         "test",
-        r#"return function() return 'hello' end"#,
+        r#"return { echo = function(ctx, msg) return 'hello' end }"#,
     )
     .await;
 
@@ -197,14 +197,16 @@ async fn test_kv_and_sql() {
         &env.store,
         "test",
         "test",
-        r#"return function()
-            kv.set('mykey', 'myvalue')
-            local v = kv.get('mykey')
-            sql.exec("CREATE TABLE IF NOT EXISTS t (msg TEXT)")
-            sql.exec("INSERT INTO t VALUES (?)", "hello")
-            local r = sql.query("SELECT msg FROM t WHERE msg = ?", "hello")
-            return {kv = v, sql = r}
-        end"#,
+        r#"return {
+            kvsqltest = function(ctx, msg)
+                kv.set('mykey', 'myvalue')
+                local v = kv.get('mykey')
+                sql.exec("CREATE TABLE IF NOT EXISTS t (msg TEXT)")
+                sql.exec("INSERT INTO t VALUES (?)", "hello")
+                local r = sql.query("SELECT msg FROM t WHERE msg = ?", "hello")
+                return {kv = v, sql = r}
+            end,
+        }"#,
     )
     .await;
 
@@ -319,7 +321,7 @@ async fn test_lua_error_satisfies() {
         &env.store,
         "test",
         "test",
-        r#"return function() error('boom') end"#,
+        r#"return { errtest = function(ctx, msg) error('boom') end }"#,
     )
     .await;
 
@@ -364,10 +366,12 @@ async fn test_notify_routes_to_target() {
         &env.store,
         "test",
         "a",
-        r#"return function()
-            notify("^test/b/entrypoint", "hello from a")
-            return "done"
-        end"#,
+        r#"return {
+            entrypoint = function(ctx, msg)
+                notify("^test/b/entrypoint", "hello from a")
+                return "done"
+            end,
+        }"#,
     )
     .await;
 
@@ -425,18 +429,22 @@ async fn test_call_with_promise_resolution() {
         &env.store,
         "test",
         "a",
-        r#"return function(v)
-            return call("^test/b/entrypoint", "ping")
-        end"#,
+        r#"return {
+            entrypoint = function(ctx, msg)
+                return call("^test/b/entrypoint", "ping")
+            end,
+        }"#,
     )
     .await;
     add_package(
         &env.store,
         "test",
         "b",
-        r#"return function(v)
-            return "pong"
-        end"#,
+        r#"return {
+            entrypoint = function(ctx, msg)
+                return "pong"
+            end,
+        }"#,
     )
     .await;
 
@@ -503,11 +511,13 @@ async fn test_concurrent_proposals_ordered() {
         &env.store,
         "test",
         "counter",
-        r#"return function(_, msg)
-            local prev = kv.get('counter')
-            kv.set('counter', msg)
-            return prev
-        end"#,
+        r#"return {
+            entrypoint = function(ctx, msg)
+                local prev = kv.get('counter')
+                kv.set('counter', msg)
+                return prev
+            end,
+        }"#,
     )
     .await;
 
@@ -636,9 +646,11 @@ async fn test_stateless_satisfy_resolves_promise() {
         &env.store,
         "test",
         "test",
-        r#"return function(_, msg)
-            return call("^sys/http", msg)
-        end"#,
+        r#"return {
+            caller = function(ctx, msg)
+                return call("^sys/http", msg)
+            end,
+        }"#,
     )
     .await;
 
@@ -730,9 +742,11 @@ async fn test_http_client_get() {
         &env.store,
         "test",
         "test",
-        r#"return function(_, msg)
-            return call("^sys/http", msg)
-        end"#,
+        r#"return {
+            caller = function(ctx, msg)
+                return call("^sys/http", msg)
+            end,
+        }"#,
     )
     .await;
 
@@ -816,9 +830,11 @@ async fn test_http_client_post() {
         &env.store,
         "test",
         "test",
-        r#"return function(_, msg)
-            return call("^sys/http", msg)
-        end"#,
+        r#"return {
+            caller = function(ctx, msg)
+                return call("^sys/http", msg)
+            end,
+        }"#,
     )
     .await;
 
@@ -869,9 +885,11 @@ async fn test_http_server_routes_by_host_header() {
         &env.store,
         "test",
         "echo",
-        r#"return function(_, msg)
-            return "echo: " .. msg
-        end"#,
+        r#"return {
+            entrypoint = function(ctx, msg)
+                return "echo: " .. msg
+            end,
+        }"#,
     )
     .await;
 

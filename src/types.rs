@@ -141,6 +141,16 @@ impl AppId {
     }
 }
 
+impl From<EventId> for ProcessId {
+    fn from(val: EventId) -> ProcessId {
+        ProcessId {
+            namespace: val.namespace,
+            app: val.app,
+            proc: val.proc,
+        }
+    }
+}
+
 impl From<ProcessId> for String {
     fn from(val: ProcessId) -> String {
         val.to_string()

@@ -95,7 +95,26 @@ local function notify(target, ...)
 end
 
 function register(template, name)
-    return syscall("register", template, name)
+    local process_id = syscall("register", template, name)
+    local ref = {
+        _process = process_id,
+        call = function(self, ...)
+            local args = {...}
+            if #args == 1 then
+                return call(process_id, args[1])
+            end
+            return call(process_id .. "/" .. args[1], args[2])
+        end,
+        notify = function(self, ...)
+            local args = {...}
+            if #args == 1 then
+                notify(process_id, args[1])
+            else
+                notify(process_id .. "/" .. args[1], args[2])
+            end
+        end,
+    }
+    return ref
 end
 
 rawset(_G, "http", http)

@@ -215,6 +215,7 @@ async fn spawn_actor(
                 scheduler.clone(),
                 state.clone(),
                 manager.clone(),
+                store.clone(),
                 code,
                 handler_name,
             );

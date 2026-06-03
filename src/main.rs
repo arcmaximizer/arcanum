@@ -66,9 +66,11 @@ async fn main() {
         &store,
         "arc",
         "echo",
-        r#"return function(ctx, value)
-        return value
-    end"#,
+        r#"return {
+        entrypoint = function(ctx, value)
+            return value
+        end,
+    }"#,
     )
     .await;
 
@@ -76,9 +78,11 @@ async fn main() {
         &store,
         "arc",
         "hello",
-        r#"return function(ctx, value)
-        return call("^arc/echo/entrypoint", { message = "Hello world!" })
-    end"#,
+        r#"return {
+        entrypoint = function(ctx, value)
+            return call("^arc/echo/entrypoint", { message = "Hello world!" })
+        end,
+    }"#,
     )
     .await;
 

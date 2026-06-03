@@ -121,6 +121,8 @@ async fn run(mut rx: mpsc::UnboundedReceiver<StatelessCall>, scheduler: Schedule
             req = req.timeout(Duration::from_millis(timeout_ms));
         }
 
+        let response_type = input["responseType"].as_str().unwrap_or("text").to_string();
+
         let response = match req.send().await {
             Ok(r) => r,
             Err(e) => {
@@ -149,26 +151,77 @@ async fn run(mut rx: mpsc::UnboundedReceiver<StatelessCall>, scheduler: Schedule
             }
         }
 
-        let body = match response.text().await {
-            Ok(b) => b,
-            Err(e) => {
-                let _ = scheduler
-                    .stateless_satisfy(
-                        call.proposal,
-                        encode_error(&format!("failed to read body: {}", e)),
-                    )
-                    .await;
-                continue;
+        let resp_json = match response_type.as_str() {
+            "json" => {
+                let text = match response.text().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = scheduler
+                            .stateless_satisfy(
+                                call.proposal,
+                                encode_error(&format!("failed to read body: {}", e)),
+                            )
+                            .await;
+                        continue;
+                    }
+                };
+                let parsed =
+                    serde_json::from_str::<JsonValue>(&text).unwrap_or(JsonValue::String(text));
+                serde_json::json!({
+                    "ok": ok,
+                    "status": status,
+                    "statusText": status_text,
+                    "headers": headers,
+                    "body": parsed,
+                })
+            }
+            "blob" | "arrayBuffer" => {
+                let bytes = match response.bytes().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = scheduler
+                            .stateless_satisfy(
+                                call.proposal,
+                                encode_error(&format!("failed to read body: {}", e)),
+                            )
+                            .await;
+                        continue;
+                    }
+                };
+                let body_array: Vec<JsonValue> = bytes
+                    .iter()
+                    .map(|b| JsonValue::Number(serde_json::Number::from(*b as u64)))
+                    .collect();
+                serde_json::json!({
+                    "ok": ok,
+                    "status": status,
+                    "statusText": status_text,
+                    "headers": headers,
+                    "body": body_array,
+                })
+            }
+            _ => {
+                let text = match response.text().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = scheduler
+                            .stateless_satisfy(
+                                call.proposal,
+                                encode_error(&format!("failed to read body: {}", e)),
+                            )
+                            .await;
+                        continue;
+                    }
+                };
+                serde_json::json!({
+                    "ok": ok,
+                    "status": status,
+                    "statusText": status_text,
+                    "headers": headers,
+                    "body": text,
+                })
             }
         };
-
-        let resp_json = serde_json::json!({
-            "ok": ok,
-            "status": status,
-            "statusText": status_text,
-            "headers": headers,
-            "body": body,
-        });
 
         let wrapped = serde_json::json!({ "data": resp_json });
         let bytes = rmp_serde::to_vec(&wrapped).unwrap_or_default();

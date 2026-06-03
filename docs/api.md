@@ -164,7 +164,7 @@ local board = register("board", "my-unique-id")
 function register(template: string, name: string): ProcessRef
 ```
 
-- `template` — the handler ID within the app (defined in the app's process map)
+- `template` — the handler name (a key in your app's returned handler table)
 - `name` — a unique name for this process instance
 - Returns a reference to the new process
 
@@ -238,38 +238,54 @@ Processes may also register URI bindings programmatically at runtime.
 
 ## Writing Apps
 
-An app is a Lua module that returns a map of process handlers:
+An app is a Lua module that returns a table mapping handler names to handler
+definitions:
 
 ```lua
-local processes = {
+return {
     entrypoint = {
-        id = "entrypoint",
         handler = function(ctx, msg)
             return "Hello from my app!"
         end,
     },
     board = {
-        id = "board",
         handler = function(ctx, msg)
             -- handle messages for this handler
         end,
     },
 }
-
-return processes
 ```
 
-Each handler receives `(ctx, msg)` where `msg` is the MessagePack-deserialized
-payload. The handler returns a value that becomes the response for `call()`.
+Each key in the returned table is the handler name used with `register()`.
+Each handler can be:
+
+- A function: `board = function(ctx, msg) ... end`
+- A table with a `handler` field:
+  ```lua
+  board = {
+      handler = function(ctx, msg) ... end,
+  }
+  ```
+- A file path string referencing another file in the package:
+  ```lua
+  board = {
+      handler = "./board.lua",
+  }
+  ```
+
+The handler function receives `(ctx, msg)` where `msg` is the
+MessagePack-deserialized payload. The handler returns a value that becomes the
+response for `call()`.
 
 ### Handler template files
 
 Handlers can reference external Lua files by path instead of inline functions:
 
 ```lua
-board = {
-    id = "board",
-    handler = "./board.lua",
+return {
+    board = {
+        handler = "./board.lua",
+    },
 }
 ```
 

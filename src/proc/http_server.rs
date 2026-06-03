@@ -133,6 +133,19 @@ async fn handle_process_messages(
                 };
                 serde_json::json!({"uris": uris})
             }
+            "remove" => {
+                let app_str = input["app"].as_str().unwrap_or("");
+                let host = input["host"].as_str().unwrap_or("");
+                let before = routes.read().await.len();
+                if let Ok(pid) = ProcessId::try_from(app_str) {
+                    routes
+                        .write()
+                        .await
+                        .retain(|(h, p)| !(h == host && p == &pid));
+                }
+                let removed = before - routes.read().await.len();
+                serde_json::json!({"ok": true, "removed": removed})
+            }
             _ => serde_json::json!({"error": format!("unknown action: {}", action)}),
         };
 

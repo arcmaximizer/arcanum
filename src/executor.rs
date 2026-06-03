@@ -3,6 +3,7 @@ use crate::{
     manager::ManagerHandle,
     scheduler::{self, Proposal, Receipt, RuntimeStatus, SchedulerHandle, Syscall},
     state::StateHandle,
+    store::StoreHandle,
     types,
 };
 use mlua::{Lua, ThreadStatus, Value as LuaValue};
@@ -181,7 +182,7 @@ fn make_context(lua: &Lua, proposal: &Proposal, handler_name: &str) -> mlua::Res
     let from = proposal
         .promise
         .as_ref()
-        .map(|p| p.target.to_string())
+        .map(|p| types::ProcessId::from(p.target.clone()).to_string())
         .unwrap_or_default();
     ctx.set("from", from)?;
 
@@ -211,6 +212,7 @@ impl ExecutorHandle {
         scheduler: SchedulerHandle,
         state: StateHandle,
         manager: ManagerHandle,
+        store: StoreHandle,
         user_code: String,
         handler_name: String,
     ) -> Self {
@@ -221,6 +223,7 @@ impl ExecutorHandle {
             scheduler,
             state,
             manager,
+            store,
             user_code,
             handler_name,
         ));
@@ -242,6 +245,7 @@ pub async fn run_executor(
     scheduler: SchedulerHandle,
     state: StateHandle,
     manager: ManagerHandle,
+    store: StoreHandle,
     user_code: String,
     handler_name: String,
 ) {
@@ -250,29 +254,61 @@ pub async fn run_executor(
     let setup: mlua::Function = lua.load(WRAPPER_CODE).eval().unwrap();
 
     let user_val: mlua::Value = lua.load(&user_code).eval().unwrap();
-    let user_fn: mlua::Function = if let Some(table) = user_val.as_table() {
-        let processes: mlua::Table = table
-            .get("processes")
-            .expect("app module table must have a 'processes' key");
-        let handler_entry: mlua::Value = processes
+    let user_fn: mlua::Function = {
+        let table = user_val
+            .as_table()
+            .expect("app must return a table of handlers");
+
+        table
+            .get::<mlua::Value>("entrypoint")
+            .expect("app must have an 'entrypoint' handler");
+
+        let handler_entry: mlua::Value = table
             .get(handler_name.as_str())
-            .unwrap_or_else(|_| panic!("handler '{}' not found in app processes", handler_name));
-        if let Some(handler_table) = handler_entry.as_table() {
-            handler_table
-                .get("handler")
-                .expect("process entry must have a 'handler' field")
-        } else if let Some(f) = handler_entry.as_function() {
-            f.clone()
-        } else {
-            panic!(
-                "process '{}' must be a function or a table with a 'handler' field",
+            .unwrap_or_else(|_| panic!("handler '{}' not found in app", handler_name));
+
+        match handler_entry {
+            mlua::Value::Function(f) => f,
+            mlua::Value::Table(t) => {
+                let handler: mlua::Value = t
+                    .get("handler")
+                    .expect("process entry must have a 'handler' field");
+                match handler {
+                    mlua::Value::Function(f) => f,
+                    mlua::Value::String(path) => {
+                        let path = path.to_string_lossy();
+                        let path = path.strip_prefix("./").unwrap_or(&path).to_string();
+                        let app_id: String = types::AppId::from(&process).into();
+                        let code = store
+                            .get_asset_by_name(app_id, path)
+                            .await
+                            .expect("handler file not found in package");
+                        let code_str = String::from_utf8_lossy(&code).into_owned();
+                        lua.load(&code_str)
+                            .eval()
+                            .expect("failed to load handler file")
+                    }
+                    _ => panic!("handler must be a function or a file path string"),
+                }
+            }
+            mlua::Value::String(path) => {
+                let path = path.to_string_lossy();
+                let path = path.strip_prefix("./").unwrap_or(&path).to_string();
+                let app_id: String = types::AppId::from(&process).into();
+                let code = store
+                    .get_asset_by_name(app_id, path)
+                    .await
+                    .expect("handler file not found in package");
+                let code_str = String::from_utf8_lossy(&code).into_owned();
+                lua.load(&code_str)
+                    .eval()
+                    .expect("failed to load handler file")
+            }
+            _ => panic!(
+                "handler '{}' must be a function, table, or file path string",
                 handler_name
-            )
+            ),
         }
-    } else if let Some(f) = user_val.as_function() {
-        f.clone()
-    } else {
-        panic!("user code must return a function or an app module table")
     };
     let wrapped: mlua::Function = setup.call(user_fn).unwrap();
 

@@ -457,19 +457,37 @@ impl Scheduler for InMemoryScheduler {
             if prev_receipt.proposal.process != receipt.proposal.process {
                 bail!("Chunk process is mismatched with previous chunk")
             }
+
+            // Invariant 4: if the previous chunk belongs to a different proposal
+            // (event was suspended by a Call and resumed via promise), then the
+            // previous chunk must end with a Call syscall
+            if prev_receipt.proposal != *proposal {
+                let prev_ends_with_call = prev_receipt
+                    .syscalls
+                    .last()
+                    .map_or(false, |s| matches!(s, Syscall::Call { .. }));
+                if !prev_ends_with_call {
+                    bail!("Previous chunk must end with a Call syscall");
+                }
+            }
         }
 
         // Parse the receipt's syscalls
         let mut calls = Vec::new();
         let mut notif_proposals = Vec::new();
 
-        for syscall in receipt.syscalls.iter() {
+        for (i, syscall) in receipt.syscalls.iter().enumerate() {
             match syscall {
                 Syscall::Call { proposal } => {
                     calls.push(proposal.clone());
                 }
                 Syscall::Notify { proposal } => notif_proposals.push(proposal.clone()),
                 _ => {}
+            }
+
+            // Invariant 7: Call must be the last syscall in the list
+            if matches!(syscall, Syscall::Call { .. }) && i != receipt.syscalls.len() - 1 {
+                bail!("Call syscall must be the last syscall in the list");
             }
         }
 
