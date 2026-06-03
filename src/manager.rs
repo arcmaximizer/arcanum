@@ -13,11 +13,11 @@ pub struct StatelessCall {
 
 #[derive(Debug)]
 pub enum ManagerMsg {
-    RegisterExecutor {
+    RegisterUnmanaged {
         process: ProcessId,
         tx: mpsc::UnboundedSender<Proposal>,
     },
-    UnregisterExecutor {
+    DeregisterUnmanaged {
         process: ProcessId,
     },
     RegisterStateless {
@@ -58,14 +58,16 @@ impl ManagerHandle {
         handle
     }
 
-    pub fn register_executor(&self, process: ProcessId, tx: mpsc::UnboundedSender<Proposal>) {
+    pub fn register_unmanaged(&self, process: ProcessId, tx: mpsc::UnboundedSender<Proposal>) {
         let _ = self
             .sender
-            .send(ManagerMsg::RegisterExecutor { process, tx });
+            .send(ManagerMsg::RegisterUnmanaged { process, tx });
     }
 
-    pub fn unregister_executor(&self, process: ProcessId) {
-        let _ = self.sender.send(ManagerMsg::UnregisterExecutor { process });
+    pub fn deregister_unmanaged(&self, process: ProcessId) {
+        let _ = self
+            .sender
+            .send(ManagerMsg::DeregisterUnmanaged { process });
     }
 
     pub fn register_stateless(&self, process: ProcessId, tx: mpsc::UnboundedSender<StatelessCall>) {
@@ -109,12 +111,12 @@ pub async fn run_manager(
 
     while let Some(msg) = rx.recv().await {
         match msg {
-            ManagerMsg::RegisterExecutor { process, tx } => {
-                tracing::debug!("manager: registered executor {}", process);
+            ManagerMsg::RegisterUnmanaged { process, tx } => {
+                tracing::debug!("manager: registered unmanaged actor {}", process);
                 executor_senders.insert(process, tx);
             }
-            ManagerMsg::UnregisterExecutor { process } => {
-                tracing::debug!("manager: unregistered executor {}", process);
+            ManagerMsg::DeregisterUnmanaged { process } => {
+                tracing::debug!("manager: deregistered unmanaged actor {}", process);
                 executor_senders.remove(&process);
             }
             ManagerMsg::RegisterStateless { process, tx } => {
