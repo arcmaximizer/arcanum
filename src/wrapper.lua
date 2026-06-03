@@ -83,7 +83,7 @@ local function notify(target, ...)
 end
 
 function spawn(template, name)
-    return syscall("spawn", template, name)
+    return syscall("register", template, name)
 end
 
 rawset(_G, "http", http)

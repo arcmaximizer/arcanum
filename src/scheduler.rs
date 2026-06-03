@@ -290,7 +290,7 @@ pub enum Syscall {
     Notify {
         proposal: Proposal,
     },
-    Spawn {
+    Register {
         process: ProcessId,
         handler: HandlerId,
     },

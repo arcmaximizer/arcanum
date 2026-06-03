@@ -121,7 +121,7 @@ async fn parse_syscall(
                 },
             }
         }
-        "spawn" => {
+        "register" => {
             let template: String = args
                 .as_ref()
                 .and_then(|a| a.get(1).ok())
@@ -140,7 +140,7 @@ async fn parse_syscall(
                 app: process.app.clone(),
                 handler: template,
             };
-            Syscall::Spawn {
+            Syscall::Register {
                 process: new_process,
                 handler,
             }
@@ -379,17 +379,17 @@ pub async fn run_executor(
                             scheduler.add_proposal(proposal.clone()).await;
                             break;
                         }
-                        Syscall::Spawn {
+                        Syscall::Register {
                             process: new_process,
                             handler,
                         } => {
                             tracing::debug!(
-                                "event={} Spawn: process={} handler={}",
+                                "event={} Register: process={} handler={}",
                                 event,
                                 new_process,
                                 handler
                             );
-                            manager.spawn_process(new_process.clone(), handler);
+                            manager.register_process(new_process.clone(), handler);
                             input = LuaValue::String(
                                 lua.create_string(new_process.to_string()).unwrap(),
                             );

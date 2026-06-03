@@ -2,7 +2,7 @@ use crate::executor::ExecutorHandle;
 use crate::scheduler::{Proposal, SchedulerHandle};
 use crate::state::StateHandle;
 use crate::store::StoreHandle;
-use crate::types::{HandlerId, ProcessId};
+use crate::types::{AppId, HandlerId, ProcessId};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
@@ -27,9 +27,12 @@ pub enum ManagerMsg {
     UnregisterStateless {
         process: ProcessId,
     },
-    SpawnProcess {
+    RegisterProcess {
         process: ProcessId,
         handler: HandlerId,
+    },
+    CreateActor {
+        process: ProcessId,
     },
     RouteProposal {
         proposal: Proposal,
@@ -77,10 +80,14 @@ impl ManagerHandle {
             .send(ManagerMsg::UnregisterStateless { process });
     }
 
-    pub fn spawn_process(&self, process: ProcessId, handler: HandlerId) {
+    pub fn register_process(&self, process: ProcessId, handler: HandlerId) {
         let _ = self
             .sender
-            .send(ManagerMsg::SpawnProcess { process, handler });
+            .send(ManagerMsg::RegisterProcess { process, handler });
+    }
+
+    pub fn create_actor(&self, process: ProcessId) {
+        let _ = self.sender.send(ManagerMsg::CreateActor { process });
     }
 
     pub fn route_proposal(&self, proposal: Proposal) {
@@ -118,13 +125,26 @@ pub async fn run_manager(
                 tracing::debug!("manager: unregistered stateless {}", process);
                 stateless_senders.remove(&process);
             }
-            ManagerMsg::SpawnProcess { process, handler } => {
+            ManagerMsg::RegisterProcess { process, handler } => {
                 tracing::debug!(
-                    "manager: spawned process {} from handler {}",
+                    "manager: registered process {} to handler {}",
                     process,
                     handler
                 );
                 handler_map.insert(process, handler);
+            }
+            ManagerMsg::CreateActor { process } => {
+                tracing::info!("manager: creating actor for {}", process);
+                spawn_actor(
+                    &process,
+                    &mut executor_senders,
+                    &handler_map,
+                    &store,
+                    &scheduler,
+                    &state,
+                    &manager,
+                )
+                .await;
             }
             ManagerMsg::RouteProposal { proposal } => {
                 let process = &proposal.process;
@@ -140,43 +160,65 @@ pub async fn run_manager(
                     continue;
                 }
 
-                tracing::info!("manager: spawning executor for {}", process);
-
-                let handler = handler_map.get(process).cloned();
-                let app_id: String = if let Some(ref h) = handler {
-                    use crate::types::AppId;
-                    String::from(AppId::from(h))
+                if spawn_actor(
+                    process,
+                    &mut executor_senders,
+                    &handler_map,
+                    &store,
+                    &scheduler,
+                    &state,
+                    &manager,
+                )
+                .await
+                {
+                    if let Some(tx) = executor_senders.get(process) {
+                        let _ = tx.send(proposal);
+                    }
                 } else {
-                    use crate::types::AppId;
-                    String::from(AppId::from(process))
-                };
-                let handler_name = handler
-                    .as_ref()
-                    .map(|h| h.handler.clone())
-                    .unwrap_or_else(|| process.proc.clone());
-
-                match store.get_asset_by_name(app_id, "main.lua".into()).await {
-                    Some(code_bytes) => {
-                        let code = String::from_utf8_lossy(&code_bytes).into_owned();
-                        let handle = ExecutorHandle::new(
-                            process.clone(),
-                            scheduler.clone(),
-                            state.clone(),
-                            manager.clone(),
-                            code,
-                            handler_name,
-                        );
-                        executor_senders.insert(process.clone(), handle.sender());
-                        let _ = handle.sender().send(proposal);
-                    }
-                    None => {
-                        tracing::error!(
-                            "manager: no code found for {} (looked up app as package name)",
-                            process
-                        );
-                    }
+                    tracing::error!(
+                        "manager: no code found for {} (looked up app as package name)",
+                        process
+                    );
                 }
             }
         }
+    }
+}
+
+async fn spawn_actor(
+    process: &ProcessId,
+    executor_senders: &mut HashMap<ProcessId, mpsc::UnboundedSender<Proposal>>,
+    handler_map: &HashMap<ProcessId, HandlerId>,
+    store: &StoreHandle,
+    scheduler: &SchedulerHandle,
+    state: &StateHandle,
+    manager: &ManagerHandle,
+) -> bool {
+    let handler = handler_map.get(process).cloned();
+    let app_id: String = if let Some(ref h) = handler {
+        AppId::from(h).into()
+    } else {
+        AppId::from(process).into()
+    };
+    let handler_name = handler
+        .as_ref()
+        .map(|h| h.handler.clone())
+        .unwrap_or_else(|| process.proc.clone());
+
+    match store.get_asset_by_name(app_id, "main.lua".into()).await {
+        Some(code_bytes) => {
+            let code = String::from_utf8_lossy(&code_bytes).into_owned();
+            let handle = ExecutorHandle::new(
+                process.clone(),
+                scheduler.clone(),
+                state.clone(),
+                manager.clone(),
+                code,
+                handler_name,
+            );
+            executor_senders.insert(process.clone(), handle.sender());
+            true
+        }
+        None => false,
     }
 }
