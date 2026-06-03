@@ -16,16 +16,28 @@ end
 
 local sql = {}
 
-function sql.exec(stmt)
-    local result = syscall("sql_exec", stmt)
+function sql.exec(stmt, ...)
+    local params = {...}
+    local result
+    if #params > 0 then
+        result = syscall("sql_exec", stmt, params)
+    else
+        result = syscall("sql_exec", stmt)
+    end
     if type(result) == "table" and result.error ~= nil then
         error(result.error)
     end
     return result
 end
 
-function sql.query(stmt)
-    local result = syscall("sql_query", stmt)
+function sql.query(stmt, ...)
+    local params = {...}
+    local result
+    if #params > 0 then
+        result = syscall("sql_query", stmt, params)
+    else
+        result = syscall("sql_query", stmt)
+    end
     if type(result) == "table" and result.error ~= nil then
         error(result.error)
     end
@@ -82,7 +94,7 @@ local function notify(target, ...)
     return syscall("notify", target, ...)
 end
 
-function spawn(template, name)
+function register(template, name)
     return syscall("register", template, name)
 end
 
@@ -91,6 +103,7 @@ rawset(_G, "kv", kv)
 rawset(_G, "sql", sql)
 rawset(_G, "call", call)
 rawset(_G, "notify", notify)
+rawset(_G, "register", register)
 rawset(_G, "coroutine", nil)
 rawset(_G, "syscall", nil)
 

@@ -20,7 +20,7 @@ local handlers = {
 
 local function enterMatch(ctx, id)
   -- Throws an error if the id is used by a different process
-  local board = spawn("board", id)
+  local board = register("board", id)
   board.call("register", ctx.from)
 end
 

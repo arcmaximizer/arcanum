@@ -71,14 +71,15 @@ Process execution is in many ways just like Erlang, and in many others, it has
 nothing alike. This area is the most inspired by Cloudflare Durable Objects.
 
 Process execution is broken into "chunks". A chunk is guaranteed to execute
-synchronously such that there is no interleaving of operations between chunks
-even across normal async boundaries.
+synchronously — there is no interleaving of operations within a single chunk.
 
 In regular JavaScript, when you run a block of synchronous code, it is
 guaranteed that there will be no other code running between operations. This is
 because your computation is a single 'task' in the event loop. However, when
-running Promises, your code is split up into multiple 'tasks' at the promise
-boundary, leading to possible interleaving. TODO: Edit this for Lua
+running Promises, your code is split up into multiple 'tasks' at each promise,
+leading to possible interleaving. A yield point in Arcanum is analogous to a
+promise boundary in JavaScript — it is the point where the runtime can
+interleave other work.
 
 ```lua
 local processes = {
@@ -88,27 +89,28 @@ local processes = {
       local counter = ctx.kv.get("counter") or 0
       ctx.kv.set("counter", counter + 1)
 
-      local response = fetch("https://example.com") -- chunk boundary
+      local response = fetch("https://example.com") -- yield point
       if not response.ok then
         error("Fetching failed")
       end
       local body = response.text()
       print("First 100 chars:\n" .. string.sub(body, 1, 100))
 
-      local response2 = ctx.call("^bob/example", "hi") -- chunk boundary
+      local response2 = ctx.call("^bob/example", "hi") -- yield point
       return response2
     end,
   },
 }
 ```
 
-Chunks are essentially the same. Arcanum will not create a new chunk when an
-existing chunk is running.
-
-Storage operations are always considered to be part of the same chunk as well
-as any synchronous operations. TODO: EDIT THIS However, any other async work such as network
-I/O or message passing results in the current chunk ending, allowing other
-tasks to run.
+Chunks are essentially the same concept. All syscalls in Arcanum are yield
+points — the Lua runtime yields to the Arcanum runtime, a receipt is recorded,
+and the runtime handles the operation. For most syscalls the Lua thread resumes
+immediately. The exception is **Call**, which **completes the proposal**: the
+current proposal is dequeued from the schedule, the Lua thread is suspended, and
+other pending proposals on this process may be processed while the callee runs.
+When the callee finishes, a new proposal carrying the return value is scheduled
+on the original process.
 
 **Storage operations are not reverted when events error!**
 
@@ -120,14 +122,14 @@ local processes = {
       local counter = ctx.kv.get("counter") or 0
       ctx.kv.set("counter", counter + 1)
 
-      local response = fetch("https://example.com") -- chunk boundary
+      local response = fetch("https://example.com") -- yield point
       if not response.ok then
         error("Fetching failed")
       end
       local body = response.text()
       print("First 100 chars:\n" .. string.sub(body, 1, 100))
 
-      local response2 = ctx.call("^bob/example", "hi") -- chunk boundary
+      local response2 = ctx.call("^bob/example", "hi") -- yield point
       return response2
     end,
   },
@@ -153,19 +155,23 @@ such as web fetching or other I/O are implemented 'as if' they were really
 processes: they can be addressed as apps such as `^sys/http` but most crucially,
 **their state is not tracked by Arcanum.**
 
-System calls can either block the process or not block it. A blocking system
-call means that Arcanum will not treat this as a chunk boundary and begin to
-process another chunk. A non-blocking system call means that Arcanum will end
-the 
+Every syscall is a **yield point** — the Lua runtime yields control to the
+Arcanum runtime, a receipt is recorded, and the runtime handles the operation.
+Most syscalls do not **complete the proposal**: the Lua thread resumes
+immediately after the syscall is handled. The exception is **Call**, which
+completes the proposal: the current proposal is dequeued, the Lua thread is
+suspended, and other pending proposals may be processed while the caller awaits
+a response. When the callee finishes, a new proposal carrying the return value
+is scheduled on the original process.
 
-The following system calls are blocking:
-- KVRead: reads a value from a key in the process's KV
-- KVWrite: writes a value to a key in the process's KV
+The following syscalls do not complete the proposal:
+- KVRead: reads a value from a key in the process's KV store
+- KVWrite: writes a value to a key in the process's KV store
+- Notify: appends a message to another process's schedule, fire-and-forget
 
-The following system calls are non-blocking:
-- Call: append a message to the chunk queue of a different process, before then
-  appending a promise to the set of pending promises
-- Notify: append a message to the chunk queue of a different process
+The following syscall completes the proposal:
+- Call: appends a message to another process's schedule with a promise,
+  suspending the current thread until the callee returns
 
 ## Chunk Trees, Events and State
 

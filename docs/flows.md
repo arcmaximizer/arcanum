@@ -4,7 +4,7 @@
 
 1. Read the pending chunk queue to find the next chunk to be processed
 2. Find the next chunk's corresponding event (and as such, in-memory execution)
-3. Step the execution forward: run until the next chunk boundary
+3. Step the execution forward: run until the next yield point
   - If it makes syscalls, store them in the pending chunk's in-memory state
 4. Push the chunk to the database
 
@@ -19,7 +19,7 @@ processes looks like the following:
 local counter = ctx.kv.get("counter")
 ctx.kv.set("counter", counter + 1)
 
-local response2 = ctx.send("^bob/example", "hi") -- chunk boundary
+local response2 = ctx.send("^bob/example", "hi") -- yield point
 return response2
 ```
 

@@ -19,6 +19,30 @@ fn extract_str(value: &mlua::Value, field: &str) -> String {
         .unwrap_or_default()
 }
 
+fn extract_sql_params(args: &Option<mlua::Table>) -> Vec<u8> {
+    let params_table: mlua::Table = match args {
+        Some(t) => match t.get::<mlua::Value>(2) {
+            Ok(mlua::Value::Table(tbl)) => tbl,
+            _ => return Vec::new(),
+        },
+        None => return Vec::new(),
+    };
+
+    let len = params_table.len().unwrap_or(0) as usize;
+    if len == 0 {
+        return Vec::new();
+    }
+
+    let mut json_params = Vec::with_capacity(len);
+    for i in 1..=len {
+        let key = mlua::Value::Integer(i as i64);
+        if let Ok(val) = params_table.get::<mlua::Value>(key) {
+            json_params.push(mlua_to_json(&val));
+        }
+    }
+    rmp_serde::to_vec(&json_params).unwrap_or_default()
+}
+
 async fn parse_syscall(
     value: &mlua::Value,
     event: &types::EventId,
@@ -59,14 +83,16 @@ async fn parse_syscall(
                 .as_ref()
                 .and_then(|a| a.get(1).ok())
                 .unwrap_or_default();
-            Syscall::SqlExec { sql }
+            let params = extract_sql_params(&args);
+            Syscall::SqlExec { sql, params }
         }
         "sql_query" => {
             let sql: String = args
                 .as_ref()
                 .and_then(|a| a.get(1).ok())
                 .unwrap_or_default();
-            Syscall::SqlQuery { sql }
+            let params = extract_sql_params(&args);
+            Syscall::SqlQuery { sql, params }
         }
         "call" => {
             let target: String = args
@@ -149,10 +175,6 @@ async fn parse_syscall(
     }
 }
 
-fn is_non_blocking(syscall: &Syscall) -> bool {
-    matches!(syscall, Syscall::Call { .. })
-}
-
 fn make_context(lua: &Lua, proposal: &Proposal, handler_name: &str) -> mlua::Result<LuaValue> {
     let ctx = lua.create_table()?;
 
@@ -164,6 +186,7 @@ fn make_context(lua: &Lua, proposal: &Proposal, handler_name: &str) -> mlua::Res
     ctx.set("from", from)?;
 
     let me_str = proposal.process.to_string();
+    ctx.set("id", me_str.clone())?;
     ctx.set("me", me_str.clone())?;
     ctx.set("self", me_str.clone())?;
     ctx.set("process", me_str.clone())?;
@@ -225,7 +248,32 @@ pub async fn run_executor(
     let lua = Lua::new();
 
     let setup: mlua::Function = lua.load(WRAPPER_CODE).eval().unwrap();
-    let user_fn: mlua::Function = lua.load(&user_code).eval().unwrap();
+
+    let user_val: mlua::Value = lua.load(&user_code).eval().unwrap();
+    let user_fn: mlua::Function = if let Some(table) = user_val.as_table() {
+        let processes: mlua::Table = table
+            .get("processes")
+            .expect("app module table must have a 'processes' key");
+        let handler_entry: mlua::Value = processes
+            .get(handler_name.as_str())
+            .unwrap_or_else(|_| panic!("handler '{}' not found in app processes", handler_name));
+        if let Some(handler_table) = handler_entry.as_table() {
+            handler_table
+                .get("handler")
+                .expect("process entry must have a 'handler' field")
+        } else if let Some(f) = handler_entry.as_function() {
+            f.clone()
+        } else {
+            panic!(
+                "process '{}' must be a function or a table with a 'handler' field",
+                handler_name
+            )
+        }
+    } else if let Some(f) = user_val.as_function() {
+        f.clone()
+    } else {
+        panic!("user code must return a function or an app module table")
+    };
     let wrapped: mlua::Function = setup.call(user_fn).unwrap();
 
     let mut threads: HashMap<types::EventId, mlua::Thread> = HashMap::new();
@@ -303,7 +351,7 @@ pub async fn run_executor(
                         status: RuntimeStatus::Normal,
                     };
 
-                    let completes_proposal = is_non_blocking(&syscall);
+                    let completes_proposal = matches!(syscall, Syscall::Call { .. });
                     tracing::debug!(
                         "event={} Sending satisfy: completes_proposal={}",
                         event,
@@ -340,14 +388,14 @@ pub async fn run_executor(
                             tracing::debug!("event={} KVWrite: state updated", event);
                             input = mlua::Value::Nil;
                         }
-                        Syscall::SqlExec { sql } => {
+                        Syscall::SqlExec { sql, params } => {
                             tracing::debug!("event={} SqlExec: sql={}", event, sql);
-                            let result = state.sql_exec(process.clone(), sql).await;
+                            let result = state.sql_exec(process.clone(), sql, params).await;
                             input = bytes_to_mlua_value(&lua, &result);
                         }
-                        Syscall::SqlQuery { sql } => {
+                        Syscall::SqlQuery { sql, params } => {
                             tracing::debug!("event={} SqlQuery: sql={}", event, sql);
-                            let result = state.sql_query(process.clone(), sql).await;
+                            let result = state.sql_query(process.clone(), sql, params).await;
                             input = bytes_to_mlua_value(&lua, &result);
                         }
                         Syscall::Notify { proposal, .. } => {

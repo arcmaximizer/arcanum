@@ -105,12 +105,17 @@ When execution fails, the event is marked as `Failed`. This is a userspace-level
 
 ### Promise Creation
 
-A promise is created when a process makes a non-blocking syscall that requires a response - specifically a `call` to another process. The scheduler appends the promise to a global promises list when the call occurs.
+A promise is created when a process makes a syscall that requires a response
+- specifically a `call` to another process. The scheduler appends the promise to
+a global promises list when the call occurs.
 
 ### Syscall Types
 
-- **Blocking syscalls** take place within a chunk and are handled by the executor. They do not end the chunk.
-- **Non-blocking syscalls** are essentially coroutine yields - they trigger the end of the current chunk and the creation of a receipt.
+- **Proposal-completing syscalls** (`Call`) trigger the end of the current
+  chunk and the creation of a receipt, completing the current proposal. The Lua
+  thread is suspended until the callee returns.
+- **Non-completing syscalls** (all other syscalls) yield within the current
+  proposal — the Lua thread resumes immediately after the operation is handled.
 
 ## Schedule Ordering
 

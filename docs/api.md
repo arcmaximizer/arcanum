@@ -36,7 +36,7 @@ Events within a process are addressed by a four-part ID:
 | Field | Alias | Description |
 |-------|-------|-------------|
 | `from` | — | The process ID that sent this message |
-| `me` | `self`, `process`, `proc` | The current process ID |
+| `id` | `me`, `self`, `process`, `proc` | The current process ID |
 | `handler` | — | The current handler's name within the process |
 | `app` | — | The current app ID (e.g. `^arc/cheeseboard`) |
 
@@ -97,8 +97,8 @@ function kv.get(key: string): string?
 function kv.set(key: string, value: string): nil
 ```
 
-KV operations are **blocking** — they do not create a chunk boundary. The
-runtime resolves them immediately from the in-memory state.
+KV operations do not **complete the proposal** — the Lua thread resumes
+immediately after the key-value pair is read or written.
 
 > **Warning**: KV writes are not reverted if the event later errors. Side
 > effects persist even on failure.
@@ -144,32 +144,32 @@ type HttpResponse = {
 }
 ```
 
-All HTTP calls are **non-blocking** — they yield at the network boundary and
-create a chunk boundary. Responses are routed back to the caller via the
+All HTTP calls **complete the proposal** — the Lua thread is suspended while the
+HTTP request is in flight. Responses are routed back to the caller via the
 promise system.
 
 ## Process Lifecycle
 
-### spawn
+### register
 
-Create a new process from a template handler:
+Register a new process instance from a template handler:
 
 ```lua
-local board = spawn("board", "my-unique-id")
+local board = register("board", "my-unique-id")
 -- board is a reference to the new process
 -- e.g. ^arc/cheeseboard/my-unique-id
 ```
 
 ```luau
-function spawn(template: string, name: string): ProcessRef
+function register(template: string, name: string): ProcessRef
 ```
 
 - `template` — the handler ID within the app (defined in the app's process map)
 - `name` — a unique name for this process instance
 - Returns a reference to the new process
 
-The spawned process gets its own isolated state. The spawning process can then
-interact with it via `call` or `notify`.
+The registered process gets its own isolated state. The registering process can
+then interact with it via `call` or `notify`.
 
 ## Arcnet
 

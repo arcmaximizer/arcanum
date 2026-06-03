@@ -280,9 +280,11 @@ pub enum Syscall {
     },
     SqlExec {
         sql: String,
+        params: Vec<u8>,
     },
     SqlQuery {
         sql: String,
+        params: Vec<u8>,
     },
     Call {
         proposal: Proposal,

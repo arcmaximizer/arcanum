@@ -31,7 +31,7 @@ pub enum ManagerMsg {
         process: ProcessId,
         handler: HandlerId,
     },
-    CreateActor {
+    SpawnActor {
         process: ProcessId,
     },
     RouteProposal {
@@ -88,8 +88,8 @@ impl ManagerHandle {
             .send(ManagerMsg::RegisterProcess { process, handler });
     }
 
-    pub fn create_actor(&self, process: ProcessId) {
-        let _ = self.sender.send(ManagerMsg::CreateActor { process });
+    pub fn spawn_actor(&self, process: ProcessId) {
+        let _ = self.sender.send(ManagerMsg::SpawnActor { process });
     }
 
     pub fn route_proposal(&self, proposal: Proposal) {
@@ -135,8 +135,8 @@ pub async fn run_manager(
                 );
                 handler_map.insert(process, handler);
             }
-            ManagerMsg::CreateActor { process } => {
-                tracing::info!("manager: creating actor for {}", process);
+            ManagerMsg::SpawnActor { process } => {
+                tracing::info!("manager: spawning actor for {}", process);
                 spawn_actor(
                     &process,
                     &mut executor_senders,

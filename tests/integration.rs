@@ -11,12 +11,34 @@ use arcanum::store::{InMemoryPackageStore, StoreHandle};
 use arcanum::types::{EventId, ProcessId};
 use tokio::sync::mpsc;
 
-fn mp(s: &str) -> Vec<u8> {
-    rmp_serde::to_vec(&serde_json::Value::String(s.into())).unwrap()
+struct TestEnv {
+    scheduler: SchedulerHandle,
+    state: StateHandle,
+    store: StoreHandle,
+    manager: ManagerHandle,
 }
 
-fn mp_null() -> Vec<u8> {
-    rmp_serde::to_vec(&serde_json::Value::Null).unwrap()
+fn setup() -> TestEnv {
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
+    let state = StateHandle::new(InMemoryKVState::new());
+    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(InMemoryScheduler::new()),
+        manager.clone(),
+    ));
+    TestEnv {
+        scheduler,
+        state,
+        store,
+        manager,
+    }
+}
+
+fn mp(s: &str) -> Vec<u8> {
+    rmp_serde::to_vec(&serde_json::Value::String(s.into())).unwrap()
 }
 
 fn msgpack_value(value: &serde_json::Value) -> Vec<u8> {
@@ -45,7 +67,7 @@ fn make_tar_gz(code: &str) -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-async fn add_app(store: &StoreHandle, namespace: &str, app: &str, code: &str) {
+async fn add_package(store: &StoreHandle, namespace: &str, app: &str, code: &str) {
     let tarball = make_tar_gz(code);
     let key = store
         .add_package(tarball.into())
@@ -113,16 +135,7 @@ async fn wait_for_empty_schedule(
 
 #[tokio::test]
 async fn test_basic_return() {
-    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
-    let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
-    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
-    tokio::spawn(run_scheduler(
-        sched_rx,
-        Box::new(InMemoryScheduler::new()),
-        manager.clone(),
-    ));
+    let env = setup();
 
     let process = ProcessId {
         namespace: "test".into(),
@@ -136,15 +149,15 @@ async fn test_basic_return() {
         seq: 0,
     };
 
-    add_app(
-        &store,
+    add_package(
+        &env.store,
         "test",
         "test",
         r#"return function() return 'hello' end"#,
     )
     .await;
 
-    scheduler
+    env.scheduler
         .add_proposal(Proposal {
             process: process.clone(),
             event: None,
@@ -153,30 +166,20 @@ async fn test_basic_return() {
         })
         .await;
 
-    let chunks = wait_for_chunks(&scheduler, event, 1, Duration::from_secs(2)).await;
+    let chunks = wait_for_chunks(&env.scheduler, event, 1, Duration::from_secs(2)).await;
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].status, RuntimeStatus::End);
     assert_eq!(chunks[0].returns, mp_data("hello"));
     assert_eq!(chunks[0].syscalls, vec![]);
 
-    // Proposal should be popped from schedule
-    assert!(scheduler.get_next(process.clone()).await.is_none());
+    assert!(env.scheduler.get_next(process.clone()).await.is_none());
 }
 
 // --- Test 2: KV + SQL combined ---
 
 #[tokio::test]
 async fn test_kv_and_sql() {
-    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
-    let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
-    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
-    tokio::spawn(run_scheduler(
-        sched_rx,
-        Box::new(InMemoryScheduler::new()),
-        manager.clone(),
-    ));
+    let env = setup();
 
     let process = ProcessId {
         namespace: "test".into(),
@@ -190,22 +193,22 @@ async fn test_kv_and_sql() {
         seq: 0,
     };
 
-    add_app(
-        &store,
+    add_package(
+        &env.store,
         "test",
         "test",
         r#"return function()
             kv.set('mykey', 'myvalue')
             local v = kv.get('mykey')
             sql.exec("CREATE TABLE IF NOT EXISTS t (msg TEXT)")
-            sql.exec("INSERT INTO t VALUES ('hello')")
-            local r = sql.query("SELECT msg FROM t")
+            sql.exec("INSERT INTO t VALUES (?)", "hello")
+            local r = sql.query("SELECT msg FROM t WHERE msg = ?", "hello")
             return {kv = v, sql = r}
         end"#,
     )
     .await;
 
-    scheduler
+    env.scheduler
         .add_proposal(Proposal {
             process: process.clone(),
             event: None,
@@ -214,7 +217,7 @@ async fn test_kv_and_sql() {
         })
         .await;
 
-    let chunks = wait_for_chunks(&scheduler, event, 6, Duration::from_secs(2)).await;
+    let chunks = wait_for_chunks(&env.scheduler, event, 6, Duration::from_secs(2)).await;
     assert_eq!(chunks.len(), 6);
 
     // Chunk 0: KVWrite syscall
@@ -241,7 +244,7 @@ async fn test_kv_and_sql() {
         }]
     );
 
-    // Chunk 2: SqlExec syscall (CREATE TABLE)
+    // Chunk 2: SqlExec syscall (CREATE TABLE) — no params
     assert_eq!(chunks[2].status, RuntimeStatus::Normal);
     assert_eq!(chunks[2].in_event_seq, 2);
     assert_eq!(chunks[2].returns, Vec::<u8>::new());
@@ -249,28 +252,32 @@ async fn test_kv_and_sql() {
         chunks[2].syscalls,
         vec![Syscall::SqlExec {
             sql: "CREATE TABLE IF NOT EXISTS t (msg TEXT)".to_string(),
+            params: vec![],
         }]
     );
 
-    // Chunk 3: SqlExec syscall (INSERT)
+    // Chunk 3: SqlExec syscall (INSERT) — parameterized
+    let hello_params = msgpack_value(&serde_json::json!(["hello"]));
     assert_eq!(chunks[3].status, RuntimeStatus::Normal);
     assert_eq!(chunks[3].in_event_seq, 3);
     assert_eq!(chunks[3].returns, Vec::<u8>::new());
     assert_eq!(
         chunks[3].syscalls,
         vec![Syscall::SqlExec {
-            sql: "INSERT INTO t VALUES ('hello')".to_string(),
+            sql: "INSERT INTO t VALUES (?)".to_string(),
+            params: hello_params.clone(),
         }]
     );
 
-    // Chunk 4: SqlQuery syscall
+    // Chunk 4: SqlQuery syscall — parameterized
     assert_eq!(chunks[4].status, RuntimeStatus::Normal);
     assert_eq!(chunks[4].in_event_seq, 4);
     assert_eq!(chunks[4].returns, Vec::<u8>::new());
     assert_eq!(
         chunks[4].syscalls,
         vec![Syscall::SqlQuery {
-            sql: "SELECT msg FROM t".to_string(),
+            sql: "SELECT msg FROM t WHERE msg = ?".to_string(),
+            params: hello_params,
         }]
     );
 
@@ -294,16 +301,7 @@ async fn test_kv_and_sql() {
 
 #[tokio::test]
 async fn test_lua_error_satisfies() {
-    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
-    let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
-    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
-    tokio::spawn(run_scheduler(
-        sched_rx,
-        Box::new(InMemoryScheduler::new()),
-        manager.clone(),
-    ));
+    let env = setup();
 
     let process = ProcessId {
         namespace: "test".into(),
@@ -317,15 +315,15 @@ async fn test_lua_error_satisfies() {
         seq: 0,
     };
 
-    add_app(
-        &store,
+    add_package(
+        &env.store,
         "test",
         "test",
         r#"return function() error('boom') end"#,
     )
     .await;
 
-    scheduler
+    env.scheduler
         .add_proposal(Proposal {
             process: process.clone(),
             event: None,
@@ -335,30 +333,21 @@ async fn test_lua_error_satisfies() {
         .await;
 
     // Error produces a satisfy with RuntimeStatus::Error and proposal is popped
-    let chunks = wait_for_chunks(&scheduler, event, 1, Duration::from_secs(2)).await;
+    let chunks = wait_for_chunks(&env.scheduler, event, 1, Duration::from_secs(2)).await;
     assert_eq!(chunks.len(), 1);
     assert_eq!(chunks[0].status, RuntimeStatus::Error);
     assert!(String::from_utf8_lossy(&chunks[0].returns).contains("boom"));
     assert_eq!(chunks[0].syscalls, vec![]);
 
     // Proposal should be popped from schedule
-    assert!(scheduler.get_next(process.clone()).await.is_none());
+    assert!(env.scheduler.get_next(process.clone()).await.is_none());
 }
 
 // --- Test 4: Notify routes to target ---
 
 #[tokio::test]
 async fn test_notify_routes_to_target() {
-    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
-    let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
-    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
-    tokio::spawn(run_scheduler(
-        sched_rx,
-        Box::new(InMemoryScheduler::new()),
-        manager.clone(),
-    ));
+    let env = setup();
 
     let proc_a = ProcessId {
         namespace: "test".into(),
@@ -371,8 +360,8 @@ async fn test_notify_routes_to_target() {
         proc: "entrypoint".into(),
     };
 
-    add_app(
-        &store,
+    add_package(
+        &env.store,
         "test",
         "a",
         r#"return function()
@@ -384,7 +373,7 @@ async fn test_notify_routes_to_target() {
 
     // Do NOT register B — the notification should still land in B's schedule
 
-    scheduler
+    env.scheduler
         .add_proposal(Proposal {
             process: proc_a.clone(),
             event: None,
@@ -394,7 +383,7 @@ async fn test_notify_routes_to_target() {
         .await;
 
     // Wait for B to get the notification proposal
-    let b_proposal = wait_for_schedule(&scheduler, &proc_b, Duration::from_secs(2))
+    let b_proposal = wait_for_schedule(&env.scheduler, &proc_b, Duration::from_secs(2))
         .await
         .expect("B should have received a notification proposal");
 
@@ -407,16 +396,7 @@ async fn test_notify_routes_to_target() {
 
 #[tokio::test]
 async fn test_call_with_promise_resolution() {
-    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
-    let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
-    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
-    tokio::spawn(run_scheduler(
-        sched_rx,
-        Box::new(InMemoryScheduler::new()),
-        manager.clone(),
-    ));
+    let env = setup();
 
     let proc_a = ProcessId {
         namespace: "test".into(),
@@ -441,8 +421,8 @@ async fn test_call_with_promise_resolution() {
         seq: 0,
     };
 
-    add_app(
-        &store,
+    add_package(
+        &env.store,
         "test",
         "a",
         r#"return function(v)
@@ -450,8 +430,8 @@ async fn test_call_with_promise_resolution() {
         end"#,
     )
     .await;
-    add_app(
-        &store,
+    add_package(
+        &env.store,
         "test",
         "b",
         r#"return function(v)
@@ -460,7 +440,7 @@ async fn test_call_with_promise_resolution() {
     )
     .await;
 
-    scheduler
+    env.scheduler
         .add_proposal(Proposal {
             process: proc_a.clone(),
             event: None,
@@ -470,7 +450,7 @@ async fn test_call_with_promise_resolution() {
         .await;
 
     // A should end up with 2 chunks: [Call syscall, End("pong")]
-    let chunks_a = wait_for_chunks(&scheduler, event_a, 2, Duration::from_secs(2)).await;
+    let chunks_a = wait_for_chunks(&env.scheduler, event_a, 2, Duration::from_secs(2)).await;
     assert_eq!(chunks_a.len(), 2);
 
     // First chunk: Call syscall
@@ -488,7 +468,7 @@ async fn test_call_with_promise_resolution() {
     assert_eq!(chunks_a[1].syscalls, vec![]);
 
     // B should have 1 chunk: End("pong")
-    let chunks_b = wait_for_chunks(&scheduler, event_b, 1, Duration::from_secs(2)).await;
+    let chunks_b = wait_for_chunks(&env.scheduler, event_b, 1, Duration::from_secs(2)).await;
     assert_eq!(chunks_b.len(), 1);
     assert_eq!(chunks_b[0].status, RuntimeStatus::End);
     assert_eq!(chunks_b[0].returns, mp_data("pong"));
@@ -499,16 +479,7 @@ async fn test_call_with_promise_resolution() {
 
 #[tokio::test]
 async fn test_concurrent_proposals_ordered() {
-    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
-    let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
-    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
-    tokio::spawn(run_scheduler(
-        sched_rx,
-        Box::new(InMemoryScheduler::new()),
-        manager.clone(),
-    ));
+    let env = setup();
 
     let process = ProcessId {
         namespace: "test".into(),
@@ -528,25 +499,25 @@ async fn test_concurrent_proposals_ordered() {
         seq: 1,
     };
 
-    add_app(
-        &store,
+    add_package(
+        &env.store,
         "test",
         "counter",
-        r#"return function(v)
+        r#"return function(_, msg)
             local prev = kv.get('counter')
-            kv.set('counter', v)
+            kv.set('counter', msg)
             return prev
         end"#,
     )
     .await;
 
     // Set initial state
-    state
+    env.state
         .set(process.clone(), "counter".into(), "0".into())
         .await;
 
     // Send two proposals back-to-back
-    scheduler
+    env.scheduler
         .add_proposal(Proposal {
             process: process.clone(),
             event: None,
@@ -554,7 +525,7 @@ async fn test_concurrent_proposals_ordered() {
             promise: None,
         })
         .await;
-    scheduler
+    env.scheduler
         .add_proposal(Proposal {
             process: process.clone(),
             event: None,
@@ -564,8 +535,8 @@ async fn test_concurrent_proposals_ordered() {
         .await;
 
     // Both events should get 3 chunks: KVRead, KVWrite, End
-    let chunks1 = wait_for_chunks(&scheduler, event1, 3, Duration::from_secs(2)).await;
-    let chunks2 = wait_for_chunks(&scheduler, event2, 3, Duration::from_secs(2)).await;
+    let chunks1 = wait_for_chunks(&env.scheduler, event1, 3, Duration::from_secs(2)).await;
+    let chunks2 = wait_for_chunks(&env.scheduler, event2, 3, Duration::from_secs(2)).await;
 
     assert_eq!(chunks1.len(), 3);
     assert_eq!(chunks2.len(), 3);
@@ -635,23 +606,14 @@ async fn test_concurrent_proposals_ordered() {
     assert_eq!(chunks2[2].in_event_seq, 2);
 
     // Both proposals should be popped from schedule
-    assert!(scheduler.get_next(process.clone()).await.is_none());
+    assert!(env.scheduler.get_next(process.clone()).await.is_none());
 }
 
 // --- Test 6: Stateless satisfy ---
 
 #[tokio::test]
 async fn test_stateless_satisfy_resolves_promise() {
-    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
-    let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
-    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
-    tokio::spawn(run_scheduler(
-        sched_rx,
-        Box::new(InMemoryScheduler::new()),
-        manager.clone(),
-    ));
+    let env = setup();
 
     let caller_proc = ProcessId {
         namespace: "test".into(),
@@ -670,22 +632,23 @@ async fn test_stateless_satisfy_resolves_promise() {
         seq: 0,
     };
 
-    add_app(
-        &store,
+    add_package(
+        &env.store,
         "test",
         "test",
-        r#"return function(v)
-            return call("^sys/http", v)
+        r#"return function(_, msg)
+            return call("^sys/http", msg)
         end"#,
     )
     .await;
 
     // Create a stateless channel (simulates an HTTP-like process)
     let (stateless_tx, mut stateless_rx) = mpsc::unbounded_channel();
-    manager.register_stateless(stateless_proc.clone(), stateless_tx);
+    env.manager
+        .register_stateless(stateless_proc.clone(), stateless_tx);
 
     // Send proposal to caller
-    scheduler
+    env.scheduler
         .add_proposal(Proposal {
             process: caller_proc.clone(),
             event: None,
@@ -704,13 +667,13 @@ async fn test_stateless_satisfy_resolves_promise() {
     // Stateless process responds via stateless_satisfy — must wrap in { data = ... }
     let response = format!("fetched: https://example.com");
     let wrapped_response = msgpack_value(&serde_json::json!({"data": response}));
-    scheduler
+    env.scheduler
         .stateless_satisfy(stateless_call.proposal, wrapped_response.clone())
         .await
         .unwrap();
 
     // Caller's promise should resolve: second chunk with the response
-    let chunks = wait_for_chunks(&scheduler, caller_event, 2, Duration::from_secs(2)).await;
+    let chunks = wait_for_chunks(&env.scheduler, caller_event, 2, Duration::from_secs(2)).await;
     assert_eq!(chunks.len(), 2);
     assert_eq!(chunks[0].status, RuntimeStatus::Normal);
     assert_eq!(chunks[0].returns, Vec::<u8>::new());
@@ -740,24 +703,16 @@ async fn test_http_client_get() {
         axum::serve(listener, app).await.unwrap();
     });
 
-    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
-    let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
-    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
-    tokio::spawn(run_scheduler(
-        sched_rx,
-        Box::new(InMemoryScheduler::new()),
-        manager.clone(),
-    ));
+    let env = setup();
 
-    let http = HttpHandle::new(scheduler.clone());
+    let http = HttpHandle::new(env.scheduler.clone());
     let http_process = ProcessId {
         namespace: "sys".into(),
         app: "http".into(),
         proc: "entrypoint".into(),
     };
-    manager.register_stateless(http_process.clone(), http.sender());
+    env.manager
+        .register_stateless(http_process.clone(), http.sender());
 
     let caller_proc = ProcessId {
         namespace: "test".into(),
@@ -771,12 +726,12 @@ async fn test_http_client_get() {
         seq: 0,
     };
 
-    add_app(
-        &store,
+    add_package(
+        &env.store,
         "test",
         "test",
-        r#"return function(v)
-            return call("^sys/http", v)
+        r#"return function(_, msg)
+            return call("^sys/http", msg)
         end"#,
     )
     .await;
@@ -785,7 +740,7 @@ async fn test_http_client_get() {
         "method": "GET",
         "url": format!("http://127.0.0.1:{}/json", addr.port()),
     }));
-    scheduler
+    env.scheduler
         .add_proposal(Proposal {
             process: caller_proc.clone(),
             event: None,
@@ -794,7 +749,7 @@ async fn test_http_client_get() {
         })
         .await;
 
-    let chunks = wait_for_chunks(&scheduler, caller_event, 2, Duration::from_secs(5)).await;
+    let chunks = wait_for_chunks(&env.scheduler, caller_event, 2, Duration::from_secs(5)).await;
     assert_eq!(chunks.len(), 2);
 
     assert_eq!(chunks[0].status, RuntimeStatus::Normal);
@@ -834,24 +789,16 @@ async fn test_http_client_post() {
         axum::serve(listener, app).await.unwrap();
     });
 
-    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
-    let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
-    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
-    tokio::spawn(run_scheduler(
-        sched_rx,
-        Box::new(InMemoryScheduler::new()),
-        manager.clone(),
-    ));
+    let env = setup();
 
-    let http = HttpHandle::new(scheduler.clone());
+    let http = HttpHandle::new(env.scheduler.clone());
     let http_process = ProcessId {
         namespace: "sys".into(),
         app: "http".into(),
         proc: "entrypoint".into(),
     };
-    manager.register_stateless(http_process.clone(), http.sender());
+    env.manager
+        .register_stateless(http_process.clone(), http.sender());
 
     let caller_proc = ProcessId {
         namespace: "test".into(),
@@ -865,12 +812,12 @@ async fn test_http_client_post() {
         seq: 0,
     };
 
-    add_app(
-        &store,
+    add_package(
+        &env.store,
         "test",
         "test",
-        r#"return function(v)
-            return call("^sys/http", v)
+        r#"return function(_, msg)
+            return call("^sys/http", msg)
         end"#,
     )
     .await;
@@ -881,7 +828,7 @@ async fn test_http_client_post() {
         "headers": {"content-type": "application/json"},
         "body": "{\"hello\":\"world\"}",
     }));
-    scheduler
+    env.scheduler
         .add_proposal(Proposal {
             process: caller_proc.clone(),
             event: None,
@@ -890,7 +837,7 @@ async fn test_http_client_post() {
         })
         .await;
 
-    let chunks = wait_for_chunks(&scheduler, caller_event, 2, Duration::from_secs(5)).await;
+    let chunks = wait_for_chunks(&env.scheduler, caller_event, 2, Duration::from_secs(5)).await;
     assert_eq!(chunks.len(), 2);
 
     let response: serde_json::Value = rmp_serde::from_slice(&chunks[1].returns).unwrap();
@@ -907,33 +854,23 @@ async fn test_http_client_post() {
 async fn test_http_server_routes_by_host_header() {
     use arcanum::proc::http_server::HttpServerHandle;
 
-    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
-    let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
-    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state.clone());
-    tokio::spawn(run_scheduler(
-        sched_rx,
-        Box::new(InMemoryScheduler::new()),
-        manager.clone(),
-    ));
-
-    let server = HttpServerHandle::new(scheduler.clone(), manager.clone(), 0).await;
+    let env = setup();
+    let server = HttpServerHandle::new(env.scheduler.clone(), 0).await;
     let port = server.port;
-
-    // Register a simple echo executor via the store
-    let process = ProcessId {
-        namespace: "test".into(),
-        app: "echo".into(),
+    let http_server_proc = ProcessId {
+        namespace: "sys".into(),
+        app: "http-server".into(),
         proc: "entrypoint".into(),
     };
+    env.manager
+        .register_stateless(http_server_proc.clone(), server.sender());
 
-    add_app(
-        &store,
+    add_package(
+        &env.store,
         "test",
         "echo",
-        r#"return function(v)
-            return "echo: " .. v
+        r#"return function(_, msg)
+            return "echo: " .. msg
         end"#,
     )
     .await;
@@ -945,7 +882,7 @@ async fn test_http_server_routes_by_host_header() {
         proc: "entrypoint".into(),
     };
 
-    scheduler
+    env.scheduler
         .add_proposal(Proposal {
             process: http_server_proc.clone(),
             event: None,
@@ -958,7 +895,7 @@ async fn test_http_server_routes_by_host_header() {
         })
         .await;
 
-    wait_for_empty_schedule(&scheduler, &http_server_proc, Duration::from_secs(2)).await;
+    wait_for_empty_schedule(&env.scheduler, &http_server_proc, Duration::from_secs(2)).await;
 
     // Send HTTP request with Host header
     let client = reqwest::Client::new();
@@ -981,19 +918,16 @@ async fn test_http_server_routes_by_host_header() {
 async fn test_http_server_unknown_host() {
     use arcanum::proc::http_server::HttpServerHandle;
 
-    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
-    let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let state = StateHandle::new(InMemoryKVState::new());
-    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store, scheduler.clone(), state.clone());
-    tokio::spawn(run_scheduler(
-        sched_rx,
-        Box::new(InMemoryScheduler::new()),
-        manager.clone(),
-    ));
-
-    let server = HttpServerHandle::new(scheduler.clone(), manager.clone(), 0).await;
+    let env = setup();
+    let server = HttpServerHandle::new(env.scheduler.clone(), 0).await;
     let port = server.port;
+    let http_server_proc = ProcessId {
+        namespace: "sys".into(),
+        app: "http-server".into(),
+        proc: "entrypoint".into(),
+    };
+    env.manager
+        .register_stateless(http_server_proc, server.sender());
 
     let client = reqwest::Client::new();
     let resp = client

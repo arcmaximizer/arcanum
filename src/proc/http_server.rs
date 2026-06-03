@@ -13,7 +13,7 @@ use reqwest::StatusCode;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::{
-    manager::{ManagerHandle, StatelessCall},
+    manager::StatelessCall,
     scheduler::{Proposal, RuntimeStatus, SchedulerHandle},
     types::ProcessId,
 };
@@ -40,42 +40,29 @@ struct AppState {
 }
 
 pub struct HttpServerHandle {
+    sender: mpsc::UnboundedSender<StatelessCall>,
     pub port: u16,
 }
 
 impl HttpServerHandle {
-    pub async fn new(scheduler: SchedulerHandle, manager: ManagerHandle, port: u16) -> Self {
+    pub async fn new(scheduler: SchedulerHandle, port: u16) -> Self {
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
             .await
             .expect("failed to bind HTTP server port");
         let port = listener.local_addr().unwrap().port();
-        Self::from_listener_with_manager(scheduler, manager, listener)
-    }
-
-    fn from_listener_with_manager(
-        scheduler: SchedulerHandle,
-        manager: ManagerHandle,
-        listener: tokio::net::TcpListener,
-    ) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let port = listener.local_addr().unwrap().port();
-
-        let process = ProcessId {
-            namespace: "sys".into(),
-            app: "http-server".into(),
-            proc: "entrypoint".into(),
-        };
-        manager.register_stateless(process, tx);
-
-        tokio::spawn(run(listener, rx, scheduler));
-        Self { port }
+        Self::from_listener(scheduler, listener)
     }
 
     pub fn from_listener(scheduler: SchedulerHandle, listener: tokio::net::TcpListener) -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
         let port = listener.local_addr().unwrap().port();
-        let (_tx, rx) = mpsc::unbounded_channel();
+
         tokio::spawn(run(listener, rx, scheduler));
-        Self { port }
+        Self { sender: tx, port }
+    }
+
+    pub fn sender(&self) -> mpsc::UnboundedSender<StatelessCall> {
+        self.sender.clone()
     }
 }
 
