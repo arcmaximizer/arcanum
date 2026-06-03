@@ -2,7 +2,7 @@ use crate::executor::ExecutorHandle;
 use crate::scheduler::{Proposal, SchedulerHandle};
 use crate::state::StateHandle;
 use crate::store::StoreHandle;
-use crate::types::ProcessId;
+use crate::types::{HandlerId, ProcessId};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 
@@ -27,6 +27,10 @@ pub enum ManagerMsg {
     UnregisterStateless {
         process: ProcessId,
     },
+    SpawnProcess {
+        process: ProcessId,
+        handler: HandlerId,
+    },
     RouteProposal {
         proposal: Proposal,
     },
@@ -40,8 +44,15 @@ pub struct ManagerHandle {
 impl ManagerHandle {
     pub fn new(store: StoreHandle, scheduler: SchedulerHandle, state: StateHandle) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
-        tokio::spawn(run_manager(receiver, store, scheduler, state));
-        Self { sender }
+        let handle = Self { sender };
+        tokio::spawn(run_manager(
+            receiver,
+            store,
+            scheduler,
+            state,
+            handle.clone(),
+        ));
+        handle
     }
 
     pub fn register_executor(&self, process: ProcessId, tx: mpsc::UnboundedSender<Proposal>) {
@@ -66,6 +77,12 @@ impl ManagerHandle {
             .send(ManagerMsg::UnregisterStateless { process });
     }
 
+    pub fn spawn_process(&self, process: ProcessId, handler: HandlerId) {
+        let _ = self
+            .sender
+            .send(ManagerMsg::SpawnProcess { process, handler });
+    }
+
     pub fn route_proposal(&self, proposal: Proposal) {
         let _ = self.sender.send(ManagerMsg::RouteProposal { proposal });
     }
@@ -76,10 +93,12 @@ pub async fn run_manager(
     store: StoreHandle,
     scheduler: SchedulerHandle,
     state: StateHandle,
+    manager: ManagerHandle,
 ) {
     let mut executor_senders: HashMap<ProcessId, mpsc::UnboundedSender<Proposal>> = HashMap::new();
     let mut stateless_senders: HashMap<ProcessId, mpsc::UnboundedSender<StatelessCall>> =
         HashMap::new();
+    let mut handler_map: HashMap<ProcessId, HandlerId> = HashMap::new();
 
     while let Some(msg) = rx.recv().await {
         match msg {
@@ -99,6 +118,14 @@ pub async fn run_manager(
                 tracing::debug!("manager: unregistered stateless {}", process);
                 stateless_senders.remove(&process);
             }
+            ManagerMsg::SpawnProcess { process, handler } => {
+                tracing::debug!(
+                    "manager: spawned process {} from handler {}",
+                    process,
+                    handler
+                );
+                handler_map.insert(process, handler);
+            }
             ManagerMsg::RouteProposal { proposal } => {
                 let process = &proposal.process;
                 tracing::debug!("manager: routing proposal to {}", process);
@@ -114,11 +141,19 @@ pub async fn run_manager(
                 }
 
                 tracing::info!("manager: spawning executor for {}", process);
-                let app_id: String = {
+
+                let handler = handler_map.get(process).cloned();
+                let app_id: String = if let Some(ref h) = handler {
                     use crate::types::AppId;
-                    let app = AppId::from(process);
-                    app.into()
+                    String::from(AppId::from(h))
+                } else {
+                    use crate::types::AppId;
+                    String::from(AppId::from(process))
                 };
+                let handler_name = handler
+                    .as_ref()
+                    .map(|h| h.handler.clone())
+                    .unwrap_or_else(|| process.proc.clone());
 
                 match store.get_asset_by_name(app_id, "main.lua".into()).await {
                     Some(code_bytes) => {
@@ -127,7 +162,9 @@ pub async fn run_manager(
                             process.clone(),
                             scheduler.clone(),
                             state.clone(),
+                            manager.clone(),
                             code,
+                            handler_name,
                         );
                         executor_senders.insert(process.clone(), handle.sender());
                         let _ = handle.sender().send(proposal);

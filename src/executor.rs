@@ -1,5 +1,6 @@
 use crate::{
     conversions::*,
+    manager::ManagerHandle,
     scheduler::{self, Proposal, Receipt, RuntimeStatus, SchedulerHandle, Syscall},
     state::StateHandle,
     types,
@@ -120,6 +121,30 @@ async fn parse_syscall(
                 },
             }
         }
+        "spawn" => {
+            let template: String = args
+                .as_ref()
+                .and_then(|a| a.get(1).ok())
+                .unwrap_or_default();
+            let name: String = args
+                .as_ref()
+                .and_then(|a| a.get(2).ok())
+                .unwrap_or_default();
+            let new_process = types::ProcessId {
+                namespace: process.namespace.clone(),
+                app: process.app.clone(),
+                proc: name,
+            };
+            let handler = types::HandlerId {
+                namespace: process.namespace.clone(),
+                app: process.app.clone(),
+                handler: template,
+            };
+            Syscall::Spawn {
+                process: new_process,
+                handler,
+            }
+        }
         _ => panic!("Unknown syscall type: {}", sys_type),
     }
 }
@@ -128,7 +153,7 @@ fn is_non_blocking(syscall: &Syscall) -> bool {
     matches!(syscall, Syscall::Call { .. })
 }
 
-fn make_context(lua: &Lua, proposal: &Proposal) -> mlua::Result<LuaValue> {
+fn make_context(lua: &Lua, proposal: &Proposal, handler_name: &str) -> mlua::Result<LuaValue> {
     let ctx = lua.create_table()?;
 
     let from = proposal
@@ -144,7 +169,7 @@ fn make_context(lua: &Lua, proposal: &Proposal) -> mlua::Result<LuaValue> {
     ctx.set("process", me_str.clone())?;
     ctx.set("proc", me_str.clone())?;
 
-    ctx.set("handler", proposal.process.proc.clone())?;
+    ctx.set("handler", handler_name)?;
 
     let app_id: String = types::AppId::from(&proposal.process).into();
     ctx.set("app", app_id)?;
@@ -162,7 +187,9 @@ impl ExecutorHandle {
         process: types::ProcessId,
         scheduler: SchedulerHandle,
         state: StateHandle,
+        manager: ManagerHandle,
         user_code: String,
+        handler_name: String,
     ) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         tokio::spawn(run_executor(
@@ -170,7 +197,9 @@ impl ExecutorHandle {
             receiver,
             scheduler,
             state,
+            manager,
             user_code,
+            handler_name,
         ));
         Self { sender, process }
     }
@@ -189,7 +218,9 @@ pub async fn run_executor(
     mut work_rx: mpsc::UnboundedReceiver<Proposal>,
     scheduler: SchedulerHandle,
     state: StateHandle,
+    manager: ManagerHandle,
     user_code: String,
+    handler_name: String,
 ) {
     let lua = Lua::new();
 
@@ -240,7 +271,7 @@ pub async fn run_executor(
             tracing::debug!("event={} Got log_seq={}", event, log_seq);
 
             let resume_result = if in_event_seq == 0 {
-                let ctx = make_context(&lua, &proposal).unwrap();
+                let ctx = make_context(&lua, &proposal, &handler_name).unwrap();
                 thread.resume::<mlua::Value>((ctx, input.clone()))
             } else {
                 thread.resume::<mlua::Value>(input.clone())
@@ -347,6 +378,21 @@ pub async fn run_executor(
                             }
                             scheduler.add_proposal(proposal.clone()).await;
                             break;
+                        }
+                        Syscall::Spawn {
+                            process: new_process,
+                            handler,
+                        } => {
+                            tracing::debug!(
+                                "event={} Spawn: process={} handler={}",
+                                event,
+                                new_process,
+                                handler
+                            );
+                            manager.spawn_process(new_process.clone(), handler);
+                            input = LuaValue::String(
+                                lua.create_string(new_process.to_string()).unwrap(),
+                            );
                         }
                     }
                 }

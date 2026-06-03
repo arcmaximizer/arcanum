@@ -1,6 +1,6 @@
 use crate::conversions::bytes_to_json_pretty;
 use crate::manager::ManagerHandle;
-use crate::types::{EventId, ProcessId};
+use crate::types::{EventId, HandlerId, ProcessId};
 use anyhow::{Result, anyhow, bail};
 use std::collections::{HashMap, VecDeque};
 use tokio::sync::{mpsc, oneshot};
@@ -270,12 +270,30 @@ pub struct Receipt {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Syscall {
-    KVRead { key: String, current_value: String },
-    KVWrite { key: String, new_value: String },
-    SqlExec { sql: String },
-    SqlQuery { sql: String },
-    Call { proposal: Proposal },
-    Notify { proposal: Proposal },
+    KVRead {
+        key: String,
+        current_value: String,
+    },
+    KVWrite {
+        key: String,
+        new_value: String,
+    },
+    SqlExec {
+        sql: String,
+    },
+    SqlQuery {
+        sql: String,
+    },
+    Call {
+        proposal: Proposal,
+    },
+    Notify {
+        proposal: Proposal,
+    },
+    Spawn {
+        process: ProcessId,
+        handler: HandlerId,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

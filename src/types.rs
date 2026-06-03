@@ -16,6 +16,13 @@ pub struct ProcessId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct HandlerId {
+    pub namespace: String,
+    pub app: String,
+    pub handler: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub struct AppId {
     pub namespace: String,
     pub app: String,
@@ -97,6 +104,15 @@ impl TryFrom<&str> for AppId {
     }
 }
 
+impl From<&HandlerId> for AppId {
+    fn from(val: &HandlerId) -> AppId {
+        AppId {
+            namespace: val.namespace.clone(),
+            app: val.app.clone(),
+        }
+    }
+}
+
 impl From<ProcessId> for AppId {
     fn from(val: ProcessId) -> AppId {
         AppId {
@@ -143,9 +159,21 @@ impl From<EventId> for String {
     }
 }
 
+impl From<HandlerId> for String {
+    fn from(val: HandlerId) -> String {
+        val.to_string()
+    }
+}
+
 impl fmt::Display for ProcessId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "^{}/{}/{}", self.namespace, self.app, self.proc)
+    }
+}
+
+impl fmt::Display for HandlerId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "^{}/{}/{}", self.namespace, self.app, self.handler)
     }
 }
 
