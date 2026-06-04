@@ -3,7 +3,9 @@ use crate::manager::ManagerHandle;
 use crate::types::{EventId, HandlerId, ProcessId};
 use anyhow::{Result, anyhow, bail};
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use tokio::sync::{mpsc, oneshot};
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum SchedulerMsg {
@@ -246,14 +248,14 @@ impl SchedulerHandle {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum RuntimeStatus {
     Normal,
     Error,
     End,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Receipt {
     pub proposal: Proposal,
     /// Sequence index inside a given event's history
@@ -267,7 +269,7 @@ pub struct Receipt {
     pub status: RuntimeStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Syscall {
     KVRead {
         key: String,
@@ -297,7 +299,7 @@ pub enum Syscall {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Proposal {
     pub process: ProcessId,
     pub event: Option<EventId>,
@@ -305,7 +307,7 @@ pub struct Proposal {
     pub promise: Option<Promise>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Promise {
     pub id: u64,
     pub target: EventId,
@@ -317,7 +319,7 @@ impl std::fmt::Display for Promise {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct NextAction {
     pub event: EventId,
     pub proposal: Option<Proposal>,
@@ -609,5 +611,380 @@ impl Scheduler for InMemoryScheduler {
         };
 
         Ok((action, new_proposals))
+    }
+}
+
+/// A scheduler that wraps InMemoryScheduler and persists all state to SQLite.
+/// On creation, it restores previous state from the database.
+pub struct PersistentScheduler {
+    inner: InMemoryScheduler,
+    conn: rusqlite::Connection,
+}
+
+impl PersistentScheduler {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        if let Some(parent) = path.as_ref().parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = rusqlite::Connection::open(path.as_ref())?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS proposals (
+                process_namespace TEXT NOT NULL,
+                process_app TEXT NOT NULL,
+                process_proc TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                data BLOB NOT NULL,
+                PRIMARY KEY (process_namespace, process_app, process_proc, position)
+            );
+            CREATE TABLE IF NOT EXISTS event_chunks (
+                event_namespace TEXT NOT NULL,
+                event_app TEXT NOT NULL,
+                event_proc TEXT NOT NULL,
+                event_seq INTEGER NOT NULL,
+                chunk_seq INTEGER NOT NULL,
+                data BLOB NOT NULL,
+                PRIMARY KEY (event_namespace, event_app, event_proc, event_seq, chunk_seq)
+            );
+            CREATE TABLE IF NOT EXISTS process_chunks (
+                process_namespace TEXT NOT NULL,
+                process_app TEXT NOT NULL,
+                process_proc TEXT NOT NULL,
+                chunk_seq INTEGER NOT NULL,
+                data BLOB NOT NULL,
+                PRIMARY KEY (process_namespace, process_app, process_proc, chunk_seq)
+            );
+            CREATE TABLE IF NOT EXISTS event_counters (
+                process_namespace TEXT NOT NULL,
+                process_app TEXT NOT NULL,
+                process_proc TEXT NOT NULL,
+                counter INTEGER NOT NULL,
+                PRIMARY KEY (process_namespace, process_app, process_proc)
+            );",
+        )?;
+
+        let mut scheduler = Self {
+            inner: InMemoryScheduler::default(),
+            conn,
+        };
+        scheduler.restore()?;
+        Ok(scheduler)
+    }
+
+    fn restore(&mut self) -> Result<()> {
+        // Restore event counters
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT process_namespace, process_app, process_proc, counter FROM event_counters")?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u64>(3)?,
+                ))
+            })?;
+            for row in rows {
+                let (ns, app, proc_name, counter) = row?;
+                let pid = ProcessId {
+                    namespace: ns,
+                    app,
+                    proc: proc_name,
+                };
+                self.inner.event_counter.insert(pid, counter);
+            }
+        }
+
+        // Restore proposals (re-add in order)
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT process_namespace, process_app, process_proc, position, data
+                 FROM proposals ORDER BY process_namespace, process_app, process_proc, position",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let data: Vec<u8> = row.get(4)?;
+                Ok(data)
+            })?;
+            for row in rows {
+                let data: Vec<u8> = row?;
+                if let Ok(proposal) = rmp_serde::from_slice::<Proposal>(&data) {
+                    self.inner
+                        .schedule
+                        .entry(proposal.process.clone())
+                        .or_default()
+                        .push_back(proposal);
+                }
+            }
+        }
+
+        // Restore event chunks
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT event_namespace, event_app, event_proc, event_seq, chunk_seq, data
+                 FROM event_chunks ORDER BY event_namespace, event_app, event_proc, event_seq, chunk_seq",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let event_ns: String = row.get(0)?;
+                let event_app: String = row.get(1)?;
+                let event_proc: String = row.get(2)?;
+                let event_seq: u64 = row.get(3)?;
+                let data: Vec<u8> = row.get(5)?;
+                Ok((event_ns, event_app, event_proc, event_seq, data))
+            })?;
+            for row in rows {
+                let (event_ns, event_app, event_proc, event_seq, data) = row?;
+                let event = EventId {
+                    namespace: event_ns,
+                    app: event_app,
+                    proc: event_proc,
+                    seq: event_seq,
+                };
+                if let Ok(receipt) = rmp_serde::from_slice::<Receipt>(&data) {
+                    self.inner
+                        .event_chunks
+                        .entry(event)
+                        .or_default()
+                        .push(receipt);
+                }
+            }
+        }
+
+        // Restore process chunks
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT process_namespace, process_app, process_proc, chunk_seq, data
+                 FROM process_chunks ORDER BY process_namespace, process_app, process_proc, chunk_seq",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let proc_ns: String = row.get(0)?;
+                let proc_app: String = row.get(1)?;
+                let proc_name: String = row.get(2)?;
+                let data: Vec<u8> = row.get(4)?;
+                Ok((proc_ns, proc_app, proc_name, data))
+            })?;
+            for row in rows {
+                let (proc_ns, proc_app, proc_name, data) = row?;
+                let pid = ProcessId {
+                    namespace: proc_ns,
+                    app: proc_app,
+                    proc: proc_name,
+                };
+                if let Ok(receipt) = rmp_serde::from_slice::<Receipt>(&data) {
+                    self.inner
+                        .process_chunks
+                        .entry(pid)
+                        .or_default()
+                        .push(receipt);
+                }
+            }
+        }
+
+        tracing::info!(
+            "Restored scheduler: {} event counters, {} proposals, {} event chunks, {} process chunks",
+            self.inner.event_counter.len(),
+            self.inner.schedule.values().map(|v| v.len()).sum::<usize>(),
+            self.inner.event_chunks.len(),
+            self.inner.process_chunks.len(),
+        );
+
+        Ok(())
+    }
+
+    fn save_proposal(&self, process: &ProcessId, position: u64, proposal: &Proposal) {
+        if let Ok(data) = rmp_serde::to_vec(proposal) {
+            let _ = self.conn.execute(
+                "INSERT OR REPLACE INTO proposals (process_namespace, process_app, process_proc, position, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    process.namespace,
+                    process.app,
+                    process.proc,
+                    position as i64,
+                    data,
+                ],
+            );
+        }
+    }
+
+    fn remove_proposal(&self, process: &ProcessId, position: i64) {
+        let _ = self.conn.execute(
+            "DELETE FROM proposals WHERE process_namespace = ?1 AND process_app = ?2 AND process_proc = ?3 AND position >= ?4",
+            rusqlite::params![process.namespace, process.app, process.proc, position],
+        );
+    }
+
+    fn save_receipt(&self, event: &EventId, chunk_seq: u64, receipt: &Receipt) {
+        if let Ok(data) = rmp_serde::to_vec(receipt) {
+            let _ = self.conn.execute(
+                "INSERT OR REPLACE INTO event_chunks (event_namespace, event_app, event_proc, event_seq, chunk_seq, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    event.namespace,
+                    event.app,
+                    event.proc,
+                    event.seq as i64,
+                    chunk_seq as i64,
+                    data,
+                ],
+            );
+        }
+    }
+
+    fn save_process_receipt(&self, process: &ProcessId, chunk_seq: u64, receipt: &Receipt) {
+        if let Ok(data) = rmp_serde::to_vec(receipt) {
+            let _ = self.conn.execute(
+                "INSERT OR REPLACE INTO process_chunks (process_namespace, process_app, process_proc, chunk_seq, data)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    process.namespace,
+                    process.app,
+                    process.proc,
+                    chunk_seq as i64,
+                    data,
+                ],
+            );
+        }
+    }
+
+    fn save_event_counter(&self, process: &ProcessId, counter: u64) {
+        let _ = self.conn.execute(
+            "INSERT OR REPLACE INTO event_counters (process_namespace, process_app, process_proc, counter)
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                process.namespace,
+                process.app,
+                process.proc,
+                counter as i64,
+            ],
+        );
+    }
+}
+
+impl Scheduler for PersistentScheduler {
+    fn add_proposal(&mut self, proposal: Proposal) -> u64 {
+        let position = self.inner.add_proposal(proposal.clone());
+        self.save_proposal(&proposal.process, position, &proposal);
+        position
+    }
+
+    fn get_next_proposal(&mut self, process: &ProcessId) -> Option<&Proposal> {
+        self.inner.get_next_proposal(process)
+    }
+
+    fn get_next_event_id(&mut self, process: &ProcessId) -> EventId {
+        let event_id = self.inner.get_next_event_id(process);
+        if let Some(&counter) = self.inner.event_counter.get(process) {
+            self.save_event_counter(process, counter);
+        }
+        event_id
+    }
+
+    fn get_log_seq(&self, process: &ProcessId) -> u64 {
+        self.inner.get_log_seq(process)
+    }
+
+    fn satisfy_proposal(
+        &mut self,
+        proposal: &Proposal,
+        receipt: Receipt,
+        completes_proposal: bool,
+    ) -> Result<(NextAction, Vec<Proposal>)> {
+        let process = &proposal.process;
+        // Determine event before mutation for saving
+        let in_event_seq = receipt.in_event_seq;
+        let _event = if let Some(ref e) = proposal.event {
+            e.clone()
+        } else if in_event_seq == 0 {
+            let event_id = *self.inner.event_counter.entry(process.clone()).or_insert(0);
+            self.inner.event_counter.insert(process.clone(), event_id + 1);
+            self.save_event_counter(process, event_id + 1);
+            EventId {
+                namespace: process.namespace.clone(),
+                app: process.app.clone(),
+                proc: process.proc.clone(),
+                seq: event_id,
+            }
+        } else {
+            let event_id = *self.inner.event_counter.entry(process.clone()).or_insert(0);
+            EventId {
+                namespace: process.namespace.clone(),
+                app: process.app.clone(),
+                proc: process.proc.clone(),
+                seq: event_id.saturating_sub(1),
+            }
+        };
+
+        let chunk_seq = receipt.in_log_seq;
+        let result = self
+            .inner
+            .satisfy_proposal(proposal, receipt, completes_proposal);
+
+        if let Ok((ref action, ref new_proposals)) = result {
+            if let Some(last) = self.inner.event_chunks.get(&action.event).and_then(|v| v.last()) {
+                self.save_receipt(&action.event, chunk_seq, last);
+            }
+            if let Some(last) = self.inner.process_chunks.get(process).and_then(|v| v.last()) {
+                self.save_process_receipt(process, chunk_seq, last);
+            }
+
+            if completes_proposal {
+                // Remove completed proposal from persisted schedule
+                let schedule = self.inner.schedule.get(process);
+                let _removed_count = schedule.map(|s| s.len() as i64).unwrap_or(0);
+                self.remove_proposal(process, 0);
+                // Re-save remaining proposals
+                if let Some(sched) = self.inner.schedule.get(process) {
+                    for (i, p) in sched.iter().enumerate() {
+                        self.save_proposal(process, i as u64, p);
+                    }
+                }
+            }
+
+            for p in new_proposals {
+                if p.promise.is_some() {
+                    // Promise proposals get added via add_proposal which already persists
+                } else {
+                    // Notifications: persist as new proposals
+                    let sched = self.inner.schedule.get(&p.process);
+                    let pos = sched.map(|s| (s.len() as u64).saturating_sub(1)).unwrap_or(0);
+                    self.save_proposal(&p.process, pos, p);
+                }
+            }
+        }
+
+        result
+    }
+
+    fn get_chunks_from_event(&self, event: &EventId) -> Option<&Vec<Receipt>> {
+        self.inner.get_chunks_from_event(event)
+    }
+
+    fn get_chunk_from_event(&self, event: &EventId, chunk_seq: u64) -> Option<&Receipt> {
+        self.inner.get_chunk_from_event(event, chunk_seq)
+    }
+
+    fn stateless_satisfy(
+        &mut self,
+        proposal: &Proposal,
+        returns: Vec<u8>,
+    ) -> Result<(NextAction, Vec<Proposal>)> {
+        let process = &proposal.process;
+        let result = self.inner.stateless_satisfy(proposal, returns);
+
+        if let Ok((_, ref new_proposals)) = result {
+            if let Some(sched) = self.inner.schedule.get(process) {
+                self.remove_proposal(process, 0);
+                for (i, p) in sched.iter().enumerate() {
+                    self.save_proposal(process, i as u64, p);
+                }
+            }
+            for p in new_proposals {
+                let sched = self.inner.schedule.get(&p.process);
+                let pos = sched.map(|s| (s.len() as u64).saturating_sub(1)).unwrap_or(0);
+                self.save_proposal(&p.process, pos, p);
+            }
+        }
+
+        result
     }
 }

@@ -1,5 +1,6 @@
 use crate::types::ProcessId;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug)]
@@ -145,28 +146,61 @@ fn json_to_sqlite_value(value: serde_json::Value) -> rusqlite::types::Value {
     }
 }
 
+fn db_path_for_process(state_dir: &Path, process: &ProcessId) -> PathBuf {
+    state_dir
+        .join(&process.namespace)
+        .join(&process.app)
+        .join(format!("{}.db", process.proc))
+}
+
 /// Spawn a per-process state actor with its own KV store and SQLite database.
-/// This allows parallel state access across different processes.
-pub fn spawn_per_process_state() -> StateHandle {
+/// The SQLite database is persisted at `{state_dir}/{namespace}/{app}/{proc}.db`.
+pub fn spawn_per_process_state(process: &ProcessId, state_dir: &Path) -> StateHandle {
+    let db_path = db_path_for_process(state_dir, process);
+    if let Some(parent) = db_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     let (sender, receiver) = mpsc::unbounded_channel();
-    tokio::spawn(run_per_process_state(receiver));
+    tokio::spawn(run_per_process_state(receiver, db_path));
     StateHandle { sender }
 }
 
-async fn run_per_process_state(mut rx: mpsc::UnboundedReceiver<StateMsg>) {
+async fn run_per_process_state(
+    mut rx: mpsc::UnboundedReceiver<StateMsg>,
+    db_path: PathBuf,
+) {
     let mut kv: HashMap<String, String> = HashMap::new();
-    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    let conn = rusqlite::Connection::open(&db_path).unwrap_or_else(|e| {
+        panic!("failed to open state database {}: {}", db_path.display(), e)
+    });
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS kv (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );",
+    )
+    .unwrap();
 
     while let Some(msg) = rx.recv().await {
         match msg {
             StateMsg::Set {
                 key, value, resp, ..
             } => {
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![&key, &value],
+                );
                 kv.insert(key, value);
                 let _ = resp.send(());
             }
             StateMsg::Get { key, resp, .. } => {
-                let value = kv.get(&key).cloned();
+                let value = conn
+                    .query_row(
+                        "SELECT value FROM kv WHERE key = ?1",
+                        rusqlite::params![&key],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok();
                 let _ = resp.send(value);
             }
             StateMsg::SqlExec {

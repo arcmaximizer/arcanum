@@ -4,6 +4,7 @@ use crate::state::{StateHandle, spawn_per_process_state};
 use crate::store::StoreHandle;
 use crate::types::{AppId, HandlerId, ProcessId};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Clone)]
@@ -49,10 +50,10 @@ pub struct ManagerHandle {
 }
 
 impl ManagerHandle {
-    pub fn new(store: StoreHandle, scheduler: SchedulerHandle) -> Self {
+    pub fn new(store: StoreHandle, scheduler: SchedulerHandle, state_dir: PathBuf) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let handle = Self { sender };
-        tokio::spawn(run_manager(receiver, store, scheduler, handle.clone()));
+        tokio::spawn(run_manager(receiver, store, scheduler, handle.clone(), state_dir));
         handle
     }
 
@@ -111,6 +112,7 @@ pub async fn run_manager(
     store: StoreHandle,
     scheduler: SchedulerHandle,
     manager: ManagerHandle,
+    state_dir: PathBuf,
 ) {
     let mut executor_senders: HashMap<ProcessId, mpsc::UnboundedSender<Proposal>> = HashMap::new();
     let mut stateless_senders: HashMap<ProcessId, mpsc::UnboundedSender<StatelessCall>> =
@@ -145,9 +147,10 @@ pub async fn run_manager(
                 handler_map.insert(process, handler);
             }
             ManagerMsg::GetStateHandle { process, resp } => {
+                let dir = state_dir.clone();
                 let handle = state_actors
-                    .entry(process)
-                    .or_insert_with(spawn_per_process_state)
+                    .entry(process.clone())
+                    .or_insert_with(|| spawn_per_process_state(&process, &dir))
                     .clone();
                 let _ = resp.send(handle);
             }
@@ -161,6 +164,7 @@ pub async fn run_manager(
                     &store,
                     &scheduler,
                     &manager,
+                    &state_dir,
                 )
                 .await;
             }
@@ -186,6 +190,7 @@ pub async fn run_manager(
                     &store,
                     &scheduler,
                     &manager,
+                    &state_dir,
                 )
                 .await
                 {
@@ -203,6 +208,7 @@ pub async fn run_manager(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_actor(
     process: &ProcessId,
     executor_senders: &mut HashMap<ProcessId, mpsc::UnboundedSender<Proposal>>,
@@ -211,6 +217,7 @@ async fn spawn_actor(
     store: &StoreHandle,
     scheduler: &SchedulerHandle,
     manager: &ManagerHandle,
+    state_dir: &Path,
 ) -> bool {
     let handler = handler_map.get(process).cloned();
     let app_id: String = if let Some(ref h) = handler {
@@ -228,7 +235,7 @@ async fn spawn_actor(
             let code = String::from_utf8_lossy(&code_bytes).into_owned();
             let process_state = state_actors
                 .entry(process.clone())
-                .or_insert_with(spawn_per_process_state)
+                .or_insert_with(|| spawn_per_process_state(process, state_dir))
                 .clone();
             let handle = ExecutorHandle::new(
                 process.clone(),

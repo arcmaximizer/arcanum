@@ -5,6 +5,7 @@ use flate2::read::GzDecoder;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
+use std::path::Path;
 use tar::Archive;
 use tokio::sync::{mpsc, oneshot};
 
@@ -219,6 +220,185 @@ impl PackageStore for InMemoryPackageStore {
     fn get_asset(&self, key: &HashKey, asset: &str) -> Option<Bytes> {
         self.cache.get(&(*key, asset.to_string())).cloned()
     }
+}
+
+pub struct SqlitePackageStore {
+    conn: rusqlite::Connection,
+    cache: HashMap<(HashKey, String), Bytes>,
+}
+
+impl SqlitePackageStore {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        if let Some(parent) = path.as_ref().parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = rusqlite::Connection::open(path.as_ref())?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS packages (
+                hash BLOB PRIMARY KEY,
+                data BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS names (
+                name TEXT PRIMARY KEY,
+                hash BLOB NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS assets (
+                hash BLOB NOT NULL,
+                path TEXT NOT NULL,
+                data BLOB NOT NULL,
+                PRIMARY KEY (hash, path)
+            );",
+        )?;
+        Ok(Self {
+            conn,
+            cache: HashMap::new(),
+        })
+    }
+}
+
+impl PackageStore for SqlitePackageStore {
+    fn resolve_name(&self, name: &str) -> Option<HashKey> {
+        self.conn
+            .query_row(
+                "SELECT hash FROM names WHERE name = ?1",
+                rusqlite::params![name],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .ok()
+            .map(|v| {
+                let mut key = [0u8; 32];
+                key.copy_from_slice(&v);
+                key
+            })
+    }
+
+    fn set_name(&mut self, name: &str, key: HashKey) {
+        let _ = self.conn.execute(
+            "INSERT OR REPLACE INTO names (name, hash) VALUES (?1, ?2)",
+            rusqlite::params![name, key.to_vec()],
+        );
+    }
+
+    fn get_package(&self, key: &HashKey) -> Option<Bytes> {
+        self.conn
+            .query_row(
+                "SELECT data FROM packages WHERE hash = ?1",
+                rusqlite::params![key.to_vec()],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .ok()
+            .map(Bytes::from)
+    }
+
+    fn add_package(&mut self, value: Bytes) -> Result<HashKey> {
+        let key: HashKey = Sha256::digest(&value).into();
+        let format = detect_tar(&value);
+
+        if format.is_none() {
+            anyhow::bail!("Invalid tarball")
+        }
+
+        // Check if already stored
+        if self
+            .conn
+            .query_row(
+                "SELECT 1 FROM packages WHERE hash = ?1",
+                rusqlite::params![key.to_vec()],
+                |_| Ok(()),
+            )
+            .is_ok()
+        {
+            anyhow::bail!("Package already exists")
+        }
+
+        self.conn.execute(
+            "INSERT INTO packages (hash, data) VALUES (?1, ?2)",
+            rusqlite::params![key.to_vec(), value.to_vec()],
+        )?;
+
+        let format = format.unwrap();
+        let reader: Box<dyn Read> = if format == ".tar.gz" {
+            Box::new(GzDecoder::new(&value[..]))
+        } else {
+            Box::new(Cursor::new(&value[..]))
+        };
+        let mut archive = Archive::new(reader);
+        for entry in archive.entries().map_err(|e| anyhow::anyhow!("{}", e))? {
+            let mut entry = entry.map_err(|e| anyhow::anyhow!("{}", e))?;
+            let path = entry.path().map_err(|e| anyhow::anyhow!("{}", e))?;
+            let path_str = path.to_string_lossy().into_owned();
+            let mut contents = Vec::new();
+            entry
+                .read_to_end(&mut contents)
+                .map_err(|e| anyhow::anyhow!("{}", e))?;
+            self.conn.execute(
+                "INSERT OR REPLACE INTO assets (hash, path, data) VALUES (?1, ?2, ?3)",
+                rusqlite::params![key.to_vec(), path_str, contents],
+            )?;
+            self.cache
+                .insert((key, path_str), contents.into());
+        }
+
+        Ok(key)
+    }
+
+    fn get_asset(&self, key: &HashKey, asset: &str) -> Option<Bytes> {
+        if let Some(cached) = self.cache.get(&(*key, asset.to_string())) {
+            return Some(cached.clone());
+        }
+        self.conn
+            .query_row(
+                "SELECT data FROM assets WHERE hash = ?1 AND path = ?2",
+                rusqlite::params![key.to_vec(), asset],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .ok()
+            .map(Bytes::from)
+    }
+}
+
+/// Scan a directory for .tar.gz files and add them as named packages.
+/// The filename (without extension) becomes the package name in the store,
+/// named as `^local/<filename>`.
+pub async fn load_packages_from_dir(
+    store: &StoreHandle,
+    dir: impl AsRef<Path>,
+) -> Result<usize> {
+    let dir = dir.as_ref();
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut count = 0;
+    let mut entries: Vec<_> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .map(|ext| ext == "tar" || ext == "gz")
+                .unwrap_or(false)
+        })
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+
+    for entry in &entries {
+        let path = entry.path();
+        let data = Bytes::from(std::fs::read(&path)?);
+        match store.add_package(data).await {
+            Ok(key) => {
+                let stem = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("unknown");
+                let name = format!("^local/{}", stem);
+                store.set_name(name, key);
+                count += 1;
+            }
+            Err(_) => {
+                // Skip duplicates and invalid tarballs
+            }
+        }
+    }
+    Ok(count)
 }
 
 fn detect_tar(data: &Bytes) -> Option<&'static str> {

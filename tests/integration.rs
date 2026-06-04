@@ -8,19 +8,26 @@ use arcanum::scheduler::{
 };
 use arcanum::store::{InMemoryPackageStore, StoreHandle};
 use arcanum::types::{EventId, ProcessId};
+use tempfile::TempDir;
 use tokio::sync::mpsc;
 
 struct TestEnv {
     scheduler: SchedulerHandle,
     store: StoreHandle,
     manager: ManagerHandle,
+    _tmpdir: TempDir,
 }
 
 fn setup() -> TestEnv {
+    let tmpdir = TempDir::new().unwrap();
     let (sched_tx, sched_rx) = mpsc::unbounded_channel();
     let scheduler = SchedulerHandle::from_sender(sched_tx);
     let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone());
+    let manager = ManagerHandle::new(
+        store.clone(),
+        scheduler.clone(),
+        tmpdir.path().join("state"),
+    );
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(InMemoryScheduler::new()),
@@ -30,6 +37,7 @@ fn setup() -> TestEnv {
         scheduler,
         store,
         manager,
+        _tmpdir: tmpdir,
     }
 }
 

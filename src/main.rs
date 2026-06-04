@@ -1,21 +1,14 @@
-mod conversions;
-mod executor;
-mod manager;
-mod proc;
-mod scheduler;
-mod state;
-mod store;
-mod types;
-
-use manager::ManagerHandle;
-use proc::http::HttpHandle;
-use proc::http_server::HttpServerHandle;
-use scheduler::{InMemoryScheduler, Proposal, SchedulerHandle, run_scheduler};
 use std::io::Write;
-use store::{InMemoryPackageStore, StoreHandle};
+
+use arcanum::config;
+use arcanum::manager::ManagerHandle;
+use arcanum::proc::http::HttpHandle;
+use arcanum::proc::http_server::HttpServerHandle;
+use arcanum::scheduler::{PersistentScheduler, Proposal, SchedulerHandle, run_scheduler};
+use arcanum::store::{SqlitePackageStore, StoreHandle, load_packages_from_dir};
 use tokio::sync::mpsc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use types::ProcessId;
+use arcanum::types::ProcessId;
 
 fn make_tar_gz(code: &str) -> Vec<u8> {
     let mut tar_bytes = Vec::new();
@@ -49,40 +42,71 @@ async fn main() {
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
+    let (config, _cli) = config::load_config();
+
+    // Ensure data directories exist
+    let data_dir = &config.data.dir;
+    std::fs::create_dir_all(data_dir).expect("failed to create data directory");
+
+    // Persistent package store
+    let store_path = config.store_db_path();
+    let store = StoreHandle::new(Box::new(
+        SqlitePackageStore::open(&store_path).expect("failed to open store database"),
+    ));
+
+    // Persistent scheduler
     let (sched_tx, sched_rx) = mpsc::unbounded_channel();
     let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let store = StoreHandle::new(Box::new(InMemoryPackageStore::new()));
-    let manager = ManagerHandle::new(store.clone(), scheduler.clone());
+    let manager = ManagerHandle::new(
+        store.clone(),
+        scheduler.clone(),
+        config.state_dir(),
+    );
+    let persistent_scheduler =
+        PersistentScheduler::open(config.scheduler_db_path()).expect("failed to open scheduler database");
     tokio::spawn(run_scheduler(
         sched_rx,
-        Box::new(InMemoryScheduler::new()),
+        Box::new(persistent_scheduler),
         manager.clone(),
     ));
 
-    // Store app code in the package store so the manager auto-spawns executors
-    register_app(
-        &store,
-        "arc",
-        "echo",
-        r#"return {
-        entrypoint = function(ctx, value)
-            return value
-        end,
-    }"#,
-    )
-    .await;
+    // Auto-load packages from the packages directory
+    let packages_dir = config.packages_dir();
+    if config.data.auto_load_packages {
+        match load_packages_from_dir(&store, &packages_dir).await {
+            Ok(count) => tracing::info!("Loaded {} packages from {}", count, packages_dir.display()),
+            Err(e) => tracing::warn!("Failed to load packages from {}: {}", packages_dir.display(), e),
+        }
+    }
 
-    register_app(
-        &store,
-        "arc",
-        "hello",
-        r#"return {
-        entrypoint = function(ctx, value)
-            return call("^arc/echo/entrypoint", { message = "Hello world!" })
-        end,
-    }"#,
-    )
-    .await;
+    // Register demo apps (only if not already loaded from disk)
+    if store.resolve_name("^arc/echo".into()).await.is_none() {
+        register_app(
+            &store,
+            "arc",
+            "echo",
+            r#"return {
+            entrypoint = function(ctx, value)
+                return value
+            end,
+        }"#,
+        )
+        .await;
+    }
+
+    if store.resolve_name("^arc/hello".into()).await.is_none() {
+        register_app(
+            &store,
+            "arc",
+            "hello",
+            r#"return {
+            entrypoint = function(ctx, value)
+                return call("^arc/echo/entrypoint", { message = "Hello world!" })
+            end,
+        }"#,
+        )
+        .await;
+    }
 
     // Register sys/http as a stateless process
     let http_process = ProcessId {
@@ -94,13 +118,17 @@ async fn main() {
     let http = HttpHandle::new(scheduler.clone());
     manager.register_stateless(http_process.clone(), http.sender());
 
-    // Start HTTP server on port 6202 (registers as ^sys/http-server)
+    // Start HTTP server (registers as ^sys/http-server)
     let server_process = ProcessId {
         namespace: "sys".to_string(),
         app: "http-server".to_string(),
         proc: "entrypoint".to_string(),
     };
-    let server = HttpServerHandle::new(scheduler.clone(), 6202).await;
+    let server = HttpServerHandle::new(
+        scheduler.clone(),
+        config.http_server.port,
+    )
+    .await;
     manager.register_stateless(server_process, server.sender());
 
     // Submit initial proposals via scheduler
