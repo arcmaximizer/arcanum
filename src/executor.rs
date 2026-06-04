@@ -9,8 +9,6 @@ use crate::{
 use mlua::{Lua, ThreadStatus, Value as LuaValue};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use tracing;
-
 const WRAPPER_CODE: &str = include_str!("wrapper.lua");
 
 fn extract_str(value: &mlua::Value, field: &str) -> String {
@@ -239,6 +237,7 @@ impl ExecutorHandle {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_executor(
     process: types::ProcessId,
     mut work_rx: mpsc::UnboundedReceiver<Proposal>,

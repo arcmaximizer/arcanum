@@ -49,7 +49,6 @@ impl HttpServerHandle {
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
             .await
             .expect("failed to bind HTTP server port");
-        let port = listener.local_addr().unwrap().port();
         Self::from_listener(scheduler, listener)
     }
 
@@ -68,7 +67,7 @@ impl HttpServerHandle {
 
 async fn run(
     listener: tokio::net::TcpListener,
-    mut rx: mpsc::UnboundedReceiver<StatelessCall>,
+    rx: mpsc::UnboundedReceiver<StatelessCall>,
     scheduler: SchedulerHandle,
 ) {
     let routes: Arc<RwLock<Vec<(String, ProcessId)>>> = Arc::new(RwLock::new(Vec::new()));
@@ -199,25 +198,25 @@ async fn handle_request(
             return (StatusCode::GATEWAY_TIMEOUT, "timeout").into_response();
         }
 
-        if let Some(chunks) = state.scheduler.get_chunks(event.clone()).await {
-            if let Some(last) = chunks.last() {
-                match last.status {
-                    RuntimeStatus::End => {
-                        let returns = &last.returns;
-                        if returns.is_empty() {
-                            return (StatusCode::NO_CONTENT, "").into_response();
-                        }
-                        if let Ok(json) = rmp_serde::from_slice::<serde_json::Value>(returns) {
-                            return (StatusCode::OK, axum::Json(json)).into_response();
-                        }
-                        return (StatusCode::OK, returns.clone()).into_response();
+        if let Some(chunks) = state.scheduler.get_chunks(event.clone()).await
+            && let Some(last) = chunks.last()
+        {
+            match last.status {
+                RuntimeStatus::End => {
+                    let returns = &last.returns;
+                    if returns.is_empty() {
+                        return (StatusCode::NO_CONTENT, "").into_response();
                     }
-                    RuntimeStatus::Error => {
-                        let error_msg = String::from_utf8_lossy(&last.returns).to_string();
-                        return (StatusCode::INTERNAL_SERVER_ERROR, error_msg).into_response();
+                    if let Ok(json) = rmp_serde::from_slice::<serde_json::Value>(returns) {
+                        return (StatusCode::OK, axum::Json(json)).into_response();
                     }
-                    RuntimeStatus::Normal => {}
+                    return (StatusCode::OK, returns.clone()).into_response();
                 }
+                RuntimeStatus::Error => {
+                    let error_msg = String::from_utf8_lossy(&last.returns).to_string();
+                    return (StatusCode::INTERNAL_SERVER_ERROR, error_msg).into_response();
+                }
+                RuntimeStatus::Normal => {}
             }
         }
 

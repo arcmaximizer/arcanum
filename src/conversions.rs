@@ -16,20 +16,18 @@ pub fn mlua_to_json(value: &mlua::Value) -> JsonValue {
             let mut array = Vec::new();
             let mut map = serde_json::Map::new();
 
-            for pair in t.pairs::<mlua::Value, mlua::Value>() {
-                if let Ok((k, v)) = pair {
-                    match &k {
-                        mlua::Value::Integer(idx) if *idx == array.len() as i64 + 1 => {
-                            array.push(mlua_to_json(&v));
-                        }
-                        mlua::Value::String(s) => {
-                            is_array = false;
-                            map.insert(s.to_string_lossy(), mlua_to_json(&v));
-                        }
-                        _ => {
-                            is_array = false;
-                            map.insert(format!("{:?}", k), mlua_to_json(&v));
-                        }
+            for (k, v) in t.pairs::<mlua::Value, mlua::Value>().flatten() {
+                match &k {
+                    mlua::Value::Integer(idx) if *idx == array.len() as i64 + 1 => {
+                        array.push(mlua_to_json(&v));
+                    }
+                    mlua::Value::String(s) => {
+                        is_array = false;
+                        map.insert(s.to_string_lossy(), mlua_to_json(&v));
+                    }
+                    _ => {
+                        is_array = false;
+                        map.insert(format!("{:?}", k), mlua_to_json(&v));
                     }
                 }
             }

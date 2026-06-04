@@ -160,6 +160,7 @@ pub trait PackageStore {
     fn get_asset(&self, key: &HashKey, asset: &str) -> Option<Bytes>;
 }
 
+#[derive(Default)]
 pub struct InMemoryPackageStore {
     names: HashMap<String, HashKey>,
     packages: HashMap<HashKey, Bytes>,
@@ -168,11 +169,7 @@ pub struct InMemoryPackageStore {
 
 impl InMemoryPackageStore {
     pub fn new() -> Self {
-        Self {
-            names: HashMap::new(),
-            packages: HashMap::new(),
-            cache: HashMap::new(),
-        }
+        Self::default()
     }
 }
 
@@ -190,7 +187,7 @@ impl PackageStore for InMemoryPackageStore {
         let key: HashKey = Sha256::digest(&value).into();
         let format = detect_tar(&value);
 
-        if format == None {
+        if format.is_none() {
             anyhow::bail!("Invalid tarball")
         }
         if self.packages.contains_key(&key) {

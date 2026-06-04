@@ -326,13 +326,14 @@ pub trait KVState {
     fn get(&self, process: &ProcessId, key: &str) -> Option<String>;
 }
 
+#[derive(Default)]
 pub struct InMemoryKVState {
     kv: HashMap<ProcessId, HashMap<String, String>>,
 }
 
 impl InMemoryKVState {
     pub fn new() -> Self {
-        Self { kv: HashMap::new() }
+        Self::default()
     }
 }
 
@@ -340,7 +341,7 @@ impl KVState for InMemoryKVState {
     fn set(&mut self, process: &ProcessId, key: &str, value: String) {
         self.kv
             .entry(process.clone())
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(key.into(), value);
     }
     fn get(&self, process: &ProcessId, key: &str) -> Option<String> {

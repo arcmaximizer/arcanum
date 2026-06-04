@@ -4,8 +4,7 @@ use crate::types::{EventId, HandlerId, ProcessId};
 use anyhow::{Result, anyhow, bail};
 use std::collections::{HashMap, VecDeque};
 use tokio::sync::{mpsc, oneshot};
-use tracing;
-
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum SchedulerMsg {
     AddProposal {
@@ -344,6 +343,7 @@ pub trait Scheduler {
     ) -> Result<(NextAction, Vec<Proposal>)>;
 }
 
+#[derive(Default)]
 pub struct InMemoryScheduler {
     pub event_chunks: HashMap<EventId, Vec<Receipt>>,
     pub process_chunks: HashMap<ProcessId, Vec<Receipt>>,
@@ -353,27 +353,19 @@ pub struct InMemoryScheduler {
 
 impl InMemoryScheduler {
     pub fn new() -> Self {
-        Self {
-            event_chunks: HashMap::new(),
-            process_chunks: HashMap::new(),
-            schedule: HashMap::new(),
-            event_counter: HashMap::new(),
-        }
+        Self::default()
     }
 }
 
 impl Scheduler for InMemoryScheduler {
     fn add_proposal(&mut self, proposal: Proposal) -> u64 {
-        let schedule = self
-            .schedule
-            .entry(proposal.process.clone())
-            .or_insert(VecDeque::new());
+        let schedule = self.schedule.entry(proposal.process.clone()).or_default();
 
         schedule.push_back(proposal);
         (schedule.len() - 1) as u64
     }
     fn get_next_proposal(&mut self, process: &ProcessId) -> Option<&Proposal> {
-        self.schedule.get(process)?.get(0)
+        self.schedule.get(process)?.front()
     }
     fn get_next_event_id(&mut self, process: &ProcessId) -> EventId {
         let seq = *self.event_counter.entry(process.clone()).or_insert(0);
@@ -425,16 +417,13 @@ impl Scheduler for InMemoryScheduler {
             }
         };
 
-        let schedule = self
-            .schedule
-            .entry(process.clone())
-            .or_insert(VecDeque::new());
+        let schedule = self.schedule.entry(process.clone()).or_default();
         let event_chunks = self.event_chunks.entry(event.clone()).or_insert(vec![]);
         let process_chunks = self.process_chunks.entry(process.clone()).or_insert(vec![]);
 
         // Proposal checks
         let first_proposal = schedule
-            .get(0)
+            .front()
             .ok_or(anyhow!("No proposals exist in schedule"))?
             .clone();
 
@@ -465,7 +454,7 @@ impl Scheduler for InMemoryScheduler {
                 let prev_ends_with_call = prev_receipt
                     .syscalls
                     .last()
-                    .map_or(false, |s| matches!(s, Syscall::Call { .. }));
+                    .is_some_and(|s| matches!(s, Syscall::Call { .. }));
                 if !prev_ends_with_call {
                     bail!("Previous chunk must end with a Call syscall");
                 }
@@ -530,23 +519,21 @@ impl Scheduler for InMemoryScheduler {
         for nt in notif_proposals {
             self.schedule
                 .entry(nt.process.clone())
-                .or_insert(VecDeque::new())
+                .or_default()
                 .push_back(nt.clone());
             new_proposals.push(nt);
         }
 
         // Satisfy any existing promises
-        if completes_proposal {
-            if let Some((source_event, source_process)) = source_chunk_data {
-                let promise_proposal = Proposal {
-                    event: Some(source_event),
-                    process: source_process,
-                    input: root_returns,
-                    promise: None,
-                };
-                self.add_proposal(promise_proposal.clone());
-                new_proposals.push(promise_proposal);
-            }
+        if completes_proposal && let Some((source_event, source_process)) = source_chunk_data {
+            let promise_proposal = Proposal {
+                event: Some(source_event),
+                process: source_process,
+                input: root_returns,
+                promise: None,
+            };
+            self.add_proposal(promise_proposal.clone());
+            new_proposals.push(promise_proposal);
         }
 
         let action = NextAction {
@@ -576,7 +563,7 @@ impl Scheduler for InMemoryScheduler {
             .ok_or(anyhow!("No schedule exists for process {}", process))?;
 
         let first_proposal = schedule
-            .get(0)
+            .front()
             .ok_or(anyhow!("No proposals exist in schedule"))?
             .clone();
 
