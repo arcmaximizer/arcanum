@@ -37,6 +37,7 @@ fn encode_response(value: &serde_json::Value) -> Vec<u8> {
 struct AppState {
     scheduler: SchedulerHandle,
     routes: Arc<RwLock<Vec<(String, ProcessId)>>>,
+    process: ProcessId,
 }
 
 pub struct HttpServerHandle {
@@ -45,18 +46,22 @@ pub struct HttpServerHandle {
 }
 
 impl HttpServerHandle {
-    pub async fn new(scheduler: SchedulerHandle, port: u16) -> Self {
+    pub async fn new(scheduler: SchedulerHandle, port: u16, process: ProcessId) -> Self {
         let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
             .await
             .expect("failed to bind HTTP server port");
-        Self::from_listener(scheduler, listener)
+        Self::from_listener(scheduler, listener, process)
     }
 
-    pub fn from_listener(scheduler: SchedulerHandle, listener: tokio::net::TcpListener) -> Self {
+    pub fn from_listener(
+        scheduler: SchedulerHandle,
+        listener: tokio::net::TcpListener,
+        process: ProcessId,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let port = listener.local_addr().unwrap().port();
 
-        tokio::spawn(run(listener, rx, scheduler));
+        tokio::spawn(run(listener, rx, scheduler, process));
         Self { sender: tx, port }
     }
 
@@ -69,12 +74,14 @@ async fn run(
     listener: tokio::net::TcpListener,
     rx: mpsc::UnboundedReceiver<StatelessCall>,
     scheduler: SchedulerHandle,
+    process: ProcessId,
 ) {
     let routes: Arc<RwLock<Vec<(String, ProcessId)>>> = Arc::new(RwLock::new(Vec::new()));
 
     let state = AppState {
         scheduler: scheduler.clone(),
         routes: routes.clone(),
+        process,
     };
 
     let app = Router::new()
@@ -186,6 +193,7 @@ async fn handle_request(
         event: Some(event.clone()),
         input,
         promise: None,
+        from: state.process.clone(),
     };
 
     state.scheduler.add_proposal(proposal).await;

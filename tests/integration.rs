@@ -4,10 +4,11 @@ use std::time::{Duration, Instant};
 use arcanum::manager::ManagerHandle;
 use arcanum::proc::http::HttpHandle;
 use arcanum::scheduler::{
-    InMemoryScheduler, Proposal, Receipt, RuntimeStatus, SchedulerHandle, Syscall, run_scheduler,
+    InMemoryScheduler, PersistentScheduler, Proposal, Receipt, RuntimeStatus, SchedulerHandle,
+    Syscall, run_scheduler,
 };
-use arcanum::store::{InMemoryPackageStore, StoreHandle};
-use arcanum::types::{EventId, ProcessId};
+use arcanum::store::{FileSystemPackageStore, InMemoryPackageStore, StoreHandle};
+use arcanum::types::{AppId, EventId, ProcessId};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -51,6 +52,26 @@ fn msgpack_value(value: &serde_json::Value) -> Vec<u8> {
 
 fn mp_data(s: &str) -> Vec<u8> {
     msgpack_value(&serde_json::json!({"data": s}))
+}
+
+fn make_tar_gz_with_files(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut tar_bytes = Vec::new();
+    {
+        let mut ar = tar::Builder::new(&mut tar_bytes);
+        for (path, content) in files {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(tar::EntryType::Regular);
+            header.set_mode(0o644);
+            header.set_size(content.len() as u64);
+            header.set_path(path).unwrap();
+            header.set_cksum();
+            ar.append(&header, *content).unwrap();
+        }
+        ar.finish().unwrap();
+    }
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&tar_bytes).unwrap();
+    encoder.finish().unwrap()
 }
 
 fn make_tar_gz(code: &str) -> Vec<u8> {
@@ -167,6 +188,7 @@ async fn test_basic_return() {
             event: None,
             input: mp("start"),
             promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
         })
         .await;
 
@@ -220,6 +242,7 @@ async fn test_kv_and_sql() {
             event: None,
             input: mp("start"),
             promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
         })
         .await;
 
@@ -335,6 +358,7 @@ async fn test_lua_error_satisfies() {
             event: None,
             input: mp("start"),
             promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
         })
         .await;
 
@@ -387,6 +411,7 @@ async fn test_notify_routes_to_target() {
             event: None,
             input: mp("start"),
             promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
         })
         .await;
 
@@ -458,6 +483,7 @@ async fn test_call_with_promise_resolution() {
             event: None,
             input: mp("start"),
             promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
         })
         .await;
 
@@ -504,11 +530,17 @@ async fn test_concurrent_proposals_ordered() {
         proc: "entrypoint".into(),
         seq: 0,
     };
-    let event2 = EventId {
+    let event_init = EventId {
         namespace: "test".into(),
         app: "counter".into(),
         proc: "entrypoint".into(),
         seq: 1,
+    };
+    let event2 = EventId {
+        namespace: "test".into(),
+        app: "counter".into(),
+        proc: "entrypoint".into(),
+        seq: 2,
     };
 
     add_package(
@@ -539,6 +571,7 @@ async fn test_concurrent_proposals_ordered() {
             event: None,
             input: mp("first"),
             promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
         })
         .await;
     env.scheduler
@@ -547,14 +580,17 @@ async fn test_concurrent_proposals_ordered() {
             event: None,
             input: mp("second"),
             promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
         })
         .await;
 
-    // Both events should get 3 chunks: KVRead, KVWrite, End
+    // Each event gets 3 chunks: KVRead, KVWrite, End
     let chunks1 = wait_for_chunks(&env.scheduler, event1, 3, Duration::from_secs(2)).await;
+    let chunks_init = wait_for_chunks(&env.scheduler, event_init, 3, Duration::from_secs(2)).await;
     let chunks2 = wait_for_chunks(&env.scheduler, event2, 3, Duration::from_secs(2)).await;
 
     assert_eq!(chunks1.len(), 3);
+    assert_eq!(chunks_init.len(), 3);
     assert_eq!(chunks2.len(), 3);
 
     // --- Event 1 (seq=0): reads initial "0", sets to "first", returns "0" ---
@@ -589,21 +625,48 @@ async fn test_concurrent_proposals_ordered() {
     assert_eq!(chunks1[2].syscalls, vec![]);
     assert_eq!(chunks1[2].in_event_seq, 2);
 
-    // --- Event 2 (seq=1): reads "first" (set by event 1), sets to "second", returns "first" ---
+    // --- Init notification (seq=1): reads "first", sets to nil (""), returns "first" ---
 
-    // Chunk 0: KVRead sees state after event 1
-    assert_eq!(chunks2[0].status, RuntimeStatus::Normal);
+    assert_eq!(chunks_init[0].status, RuntimeStatus::Normal);
     assert_eq!(
-        chunks2[0].syscalls,
+        chunks_init[0].syscalls,
         vec![Syscall::KVRead {
             key: "counter".into(),
             current_value: "first".into(),
         }]
     );
+    assert_eq!(chunks_init[0].returns, Vec::<u8>::new());
+    assert_eq!(chunks_init[0].in_event_seq, 0);
+
+    assert_eq!(chunks_init[1].status, RuntimeStatus::Normal);
+    assert_eq!(
+        chunks_init[1].syscalls,
+        vec![Syscall::KVWrite {
+            key: "counter".into(),
+            new_value: "".into(),
+        }]
+    );
+    assert_eq!(chunks_init[1].returns, Vec::<u8>::new());
+    assert_eq!(chunks_init[1].in_event_seq, 1);
+
+    assert_eq!(chunks_init[2].status, RuntimeStatus::End);
+    assert_eq!(chunks_init[2].returns, mp_data("first"));
+    assert_eq!(chunks_init[2].syscalls, vec![]);
+    assert_eq!(chunks_init[2].in_event_seq, 2);
+
+    // --- Event 2 (seq=2): reads "" (set by init), sets to "second", returns "" ---
+
+    assert_eq!(chunks2[0].status, RuntimeStatus::Normal);
+    assert_eq!(
+        chunks2[0].syscalls,
+        vec![Syscall::KVRead {
+            key: "counter".into(),
+            current_value: "".into(),
+        }]
+    );
     assert_eq!(chunks2[0].returns, Vec::<u8>::new());
     assert_eq!(chunks2[0].in_event_seq, 0);
 
-    // Chunk 1: KVWrite sets to "second"
     assert_eq!(chunks2[1].status, RuntimeStatus::Normal);
     assert_eq!(
         chunks2[1].syscalls,
@@ -615,13 +678,12 @@ async fn test_concurrent_proposals_ordered() {
     assert_eq!(chunks2[1].returns, Vec::<u8>::new());
     assert_eq!(chunks2[1].in_event_seq, 1);
 
-    // Chunk 2: End — returns prev ("first")
     assert_eq!(chunks2[2].status, RuntimeStatus::End);
-    assert_eq!(chunks2[2].returns, mp_data("first"));
+    assert_eq!(chunks2[2].returns, mp_data(""));
     assert_eq!(chunks2[2].syscalls, vec![]);
     assert_eq!(chunks2[2].in_event_seq, 2);
 
-    // Both proposals should be popped from schedule
+    // All proposals should be popped from schedule
     assert!(env.scheduler.get_next(process.clone()).await.is_none());
 }
 
@@ -672,6 +734,7 @@ async fn test_stateless_satisfy_resolves_promise() {
             event: None,
             input: mp("start"),
             promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
         })
         .await;
 
@@ -766,6 +829,7 @@ async fn test_http_client_get() {
             event: None,
             input,
             promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
         })
         .await;
 
@@ -856,6 +920,7 @@ async fn test_http_client_post() {
             event: None,
             input,
             promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
         })
         .await;
 
@@ -877,13 +942,13 @@ async fn test_http_server_routes_by_host_header() {
     use arcanum::proc::http_server::HttpServerHandle;
 
     let env = setup();
-    let server = HttpServerHandle::new(env.scheduler.clone(), 0).await;
-    let port = server.port;
     let http_server_proc = ProcessId {
         namespace: "sys".into(),
         app: "http-server".into(),
         proc: "entrypoint".into(),
     };
+    let server = HttpServerHandle::new(env.scheduler.clone(), 0, http_server_proc.clone()).await;
+    let port = server.port;
     env.manager
         .register_stateless(http_server_proc.clone(), server.sender());
 
@@ -916,6 +981,7 @@ async fn test_http_server_routes_by_host_header() {
                 "host": "example.com",
             })),
             promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
         })
         .await;
 
@@ -943,24 +1009,223 @@ async fn test_http_server_unknown_host() {
     use arcanum::proc::http_server::HttpServerHandle;
 
     let env = setup();
-    let server = HttpServerHandle::new(env.scheduler.clone(), 0).await;
-    let port = server.port;
     let http_server_proc = ProcessId {
         namespace: "sys".into(),
         app: "http-server".into(),
         proc: "entrypoint".into(),
     };
+    let server = HttpServerHandle::new(env.scheduler.clone(), 0, http_server_proc.clone()).await;
+    let port = server.port;
     env.manager
-        .register_stateless(http_server_proc, server.sender());
+        .register_stateless(http_server_proc.clone(), server.sender());
 
     let client = reqwest::Client::new();
     let resp = client
-        .post(format!("http://127.0.0.1:{}/any/path", port))
-        .header("Host", "unknown.example.com")
+        .post(format!("http://127.0.0.1:{}/some-path", port))
+        .header("host", "example.com")
+        .body("test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+// --- Test 12: Spawn sends blank init notification ---
+
+#[tokio::test]
+async fn test_spawn_sends_init_notification() {
+    let env = setup();
+
+    let process = ProcessId {
+        namespace: "test".into(),
+        app: "init-test".into(),
+        proc: "entrypoint".into(),
+    };
+    let event = EventId {
+        namespace: "test".into(),
+        app: "init-test".into(),
+        proc: "entrypoint".into(),
+        seq: 0,
+    };
+
+    add_package(
+        &env.store,
+        "test",
+        "init-test",
+        r#"return { entrypoint = function(ctx, msg) return msg end }"#,
+    )
+    .await;
+
+    // Spawn the actor — this triggers the blank init notification via the scheduler
+    env.manager.spawn_actor(process.clone());
+
+    // The executor receives and processes the blank init (nil), returns nil
+    let chunks = wait_for_chunks(&env.scheduler, event, 1, Duration::from_secs(2)).await;
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].status, RuntimeStatus::End);
+    assert_eq!(
+        chunks[0].returns,
+        msgpack_value(&serde_json::json!({"data": null}))
+    );
+    assert_eq!(chunks[0].syscalls, vec![]);
+}
+
+// --- Test 13: Auto-spawn on first proposal also sends init notification ---
+
+#[tokio::test]
+async fn test_auto_spawn_sends_init_notification() {
+    let env = setup();
+
+    let process = ProcessId {
+        namespace: "test".into(),
+        app: "auto-init".into(),
+        proc: "entrypoint".into(),
+    };
+    // Original proposal arrives first (seq 0), init notification arrives second (seq 1)
+    let event_first = EventId {
+        namespace: "test".into(),
+        app: "auto-init".into(),
+        proc: "entrypoint".into(),
+        seq: 0,
+    };
+    let event_init = EventId {
+        namespace: "test".into(),
+        app: "auto-init".into(),
+        proc: "entrypoint".into(),
+        seq: 1,
+    };
+
+    add_package(
+        &env.store,
+        "test",
+        "auto-init",
+        r#"return { entrypoint = function(ctx, msg) return msg end }"#,
+    )
+    .await;
+
+    // Send a proposal — auto-spawns the actor, which also enqueues an init notification
+    env.scheduler
+        .add_proposal(Proposal {
+            process: process.clone(),
+            event: None,
+            input: mp("hello"),
+            promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+        })
+        .await;
+
+    // The original proposal (seq 0) is forwarded first since spawn_actor is synchronous
+    // within the RouteProposal handler
+    let first_chunks = wait_for_chunks(&env.scheduler, event_first, 1, Duration::from_secs(2)).await;
+    assert_eq!(first_chunks.len(), 1);
+    assert_eq!(first_chunks[0].status, RuntimeStatus::End);
+    assert_eq!(first_chunks[0].returns, mp_data("hello"));
+    assert_eq!(first_chunks[0].syscalls, vec![]);
+
+    // The init notification (seq 1) arrives after, via a second RouteProposal
+    let init_chunks = wait_for_chunks(&env.scheduler, event_init, 1, Duration::from_secs(2)).await;
+    assert_eq!(init_chunks.len(), 1);
+    assert_eq!(init_chunks[0].status, RuntimeStatus::End);
+    assert_eq!(
+        init_chunks[0].returns,
+        msgpack_value(&serde_json::json!({"data": null}))
+    );
+}
+
+// --- Blackbox test: full flow through filesystem, SQLite, and HTTP ---
+
+#[tokio::test]
+async fn test_blackbox_full_flow() {
+    use arcanum::proc::http_server::HttpServerHandle;
+
+    let tmpdir = TempDir::new().unwrap();
+    let store_dir = tmpdir.path().join("store");
+    std::fs::create_dir_all(&store_dir).unwrap();
+
+    // Create a tar.gz package with arcanum.toml + main.lua on disk
+    let code = br#"return { entrypoint = function(ctx, msg) return ctx.from end }"#;
+    let toml = br#"name = "^test/echo""#;
+    let tarball = make_tar_gz_with_files(&[
+        ("main.lua", &code[..]),
+        ("arcanum.toml", &toml[..]),
+    ]);
+    std::fs::write(store_dir.join("pkg.tar.gz"), &tarball).unwrap();
+
+    // Open filesystem store (reads tar.gz, extracts arcanum.toml, registers name)
+    let store = StoreHandle::new(Box::new(
+        FileSystemPackageStore::open(&store_dir).unwrap(),
+    ));
+
+    // Name was auto-registered from arcanum.toml inside the tar.gz
+    let names = store.list_names().await;
+    assert!(
+        names.contains(&"^test/echo".to_string()),
+        "name must be auto-registered from arcanum.toml inside tar.gz"
+    );
+
+    // Set up persistent SQLite-backed scheduler + manager
+    let (sched_tx, sched_rx) = mpsc::unbounded_channel();
+    let scheduler = SchedulerHandle::from_sender(sched_tx);
+    let state_dir = tmpdir.path().join("state");
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), state_dir);
+
+    let scheduler_db = tmpdir.path().join("scheduler.db");
+    let persistent_scheduler = PersistentScheduler::open(&scheduler_db).unwrap();
+    tokio::spawn(run_scheduler(
+        sched_rx,
+        Box::new(persistent_scheduler),
+        manager.clone(),
+    ));
+
+    // Auto-spawn entrypoints like main.rs does
+    for name in store.list_names().await {
+        if let Ok(app_id) = AppId::try_from(name.as_str()) {
+            let process = app_id.with_process("entrypoint".to_string());
+            manager.spawn_actor(process);
+        }
+    }
+
+    // Start HTTP server (the only external interface)
+    let http_server_proc = ProcessId {
+        namespace: "sys".into(),
+        app: "http-server".into(),
+        proc: "entrypoint".into(),
+    };
+    let server = HttpServerHandle::new(scheduler.clone(), 0, http_server_proc.clone()).await;
+    let port = server.port;
+    manager.register_stateless(http_server_proc.clone(), server.sender());
+
+    // Register a route: map Host header "example.com" to ^test/echo
+    scheduler
+        .add_proposal(Proposal {
+            process: http_server_proc.clone(),
+            event: None,
+            input: msgpack_value(&serde_json::json!({
+                "action": "add",
+                "app": "test/echo",
+                "host": "example.com",
+            })),
+            promise: None,
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+        })
+        .await;
+
+    // Allow the route registration and init notification to settle
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Make an HTTP request through the server
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/any-path", port))
+        .header("Host", "example.com")
         .body("hello")
         .send()
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), 404);
+    // The handler returns ctx.from — for an HTTP-triggered event this is
+    // the HTTP server's own process ID
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert_eq!(body["data"], "^sys/http-server/entrypoint");
 }

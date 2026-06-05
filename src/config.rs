@@ -84,8 +84,8 @@ impl ArcanumConfig {
         self.data.dir.join("scheduler.db")
     }
 
-    pub fn store_db_path(&self) -> PathBuf {
-        self.data.dir.join("store.db")
+    pub fn store_dir(&self) -> PathBuf {
+        self.data.dir.join("store")
     }
 }
 

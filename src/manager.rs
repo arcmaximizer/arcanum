@@ -246,7 +246,23 @@ async fn spawn_actor(
                 code,
                 handler_name,
             );
-            executor_senders.insert(process.clone(), handle.sender());
+            let sender = handle.sender();
+            executor_senders.insert(process.clone(), sender);
+
+            // Send a blank init notification from ^sys/init/entrypoint
+            let init_proposal = Proposal {
+                process: process.clone(),
+                event: None,
+                input: vec![],
+                promise: None,
+                from: ProcessId {
+                    namespace: "sys".into(),
+                    app: "init".into(),
+                    proc: "entrypoint".into(),
+                },
+            };
+            scheduler.add_proposal(init_proposal).await;
+
             true
         }
         None => false,

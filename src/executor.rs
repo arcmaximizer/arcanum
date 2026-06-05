@@ -47,7 +47,7 @@ async fn parse_syscall(
     event: &types::EventId,
     log_seq: u64,
     state: &StateHandle,
-    process: &types::ProcessId,
+    current_process: &types::ProcessId,
 ) -> Syscall {
     let sys_type = extract_str(value, "type");
     let args = value
@@ -61,7 +61,7 @@ async fn parse_syscall(
                 .and_then(|a| a.get(1).ok())
                 .unwrap_or_default();
             let current_value = state
-                .get(process.clone(), key.clone())
+                .get(current_process.clone(), key.clone())
                 .await
                 .unwrap_or_default();
             Syscall::KVRead { key, current_value }
@@ -118,6 +118,7 @@ async fn parse_syscall(
                         id: log_seq,
                         target: event.clone(),
                     }),
+                    from: current_process.clone(),
                 },
             }
         }
@@ -143,6 +144,7 @@ async fn parse_syscall(
                     event: None,
                     input,
                     promise: None,
+                    from: current_process.clone(),
                 },
             }
         }
@@ -156,13 +158,13 @@ async fn parse_syscall(
                 .and_then(|a| a.get(2).ok())
                 .unwrap_or_default();
             let new_process = types::ProcessId {
-                namespace: process.namespace.clone(),
-                app: process.app.clone(),
+                namespace: current_process.namespace.clone(),
+                app: current_process.app.clone(),
                 proc: name,
             };
             let handler = types::HandlerId {
-                namespace: process.namespace.clone(),
-                app: process.app.clone(),
+                namespace: current_process.namespace.clone(),
+                app: current_process.app.clone(),
                 handler: template,
             };
             Syscall::Register {
@@ -177,11 +179,7 @@ async fn parse_syscall(
 fn make_context(lua: &Lua, proposal: &Proposal, handler_name: &str) -> mlua::Result<LuaValue> {
     let ctx = lua.create_table()?;
 
-    let from = proposal
-        .promise
-        .as_ref()
-        .map(|p| types::ProcessId::from(p.target.clone()).to_string())
-        .unwrap_or_default();
+    let from = proposal.from.to_string();
     ctx.set("from", from)?;
 
     let me_str = proposal.process.to_string();

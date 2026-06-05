@@ -305,6 +305,7 @@ pub struct Proposal {
     pub event: Option<EventId>,
     pub input: Vec<u8>,
     pub promise: Option<Promise>,
+    pub from: ProcessId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -533,6 +534,7 @@ impl Scheduler for InMemoryScheduler {
                 process: source_process,
                 input: root_returns,
                 promise: None,
+                from: proposal.process.clone(),
             };
             self.add_proposal(promise_proposal.clone());
             new_proposals.push(promise_proposal);
@@ -595,6 +597,7 @@ impl Scheduler for InMemoryScheduler {
                 process: source_process,
                 input: returns,
                 promise: None,
+                from: proposal.process.clone(),
             };
             self.add_proposal(promise_proposal.clone());
             new_proposals.push(promise_proposal);
