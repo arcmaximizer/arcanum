@@ -53,7 +53,13 @@ impl ManagerHandle {
     pub fn new(store: StoreHandle, scheduler: SchedulerHandle, state_dir: PathBuf) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         let handle = Self { sender };
-        tokio::spawn(run_manager(receiver, store, scheduler, handle.clone(), state_dir));
+        tokio::spawn(run_manager(
+            receiver,
+            store,
+            scheduler,
+            handle.clone(),
+            state_dir,
+        ));
         handle
     }
 

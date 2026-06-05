@@ -458,7 +458,11 @@ fn package_name_from_toml(data: &[u8]) -> Option<String> {
     let toml_str = String::from_utf8_lossy(data);
     let root: ArcanumToml = toml::from_str(&toml_str).ok()?;
     let raw = root.name.or_else(|| root.package.and_then(|p| p.name))?;
-    if raw.starts_with('^') { Some(raw) } else { Some(format!("^{}", raw)) }
+    if raw.starts_with('^') {
+        Some(raw)
+    } else {
+        Some(format!("^{}", raw))
+    }
 }
 
 fn detect_tar(data: &Bytes) -> Option<&'static str> {

@@ -676,9 +676,9 @@ impl PersistentScheduler {
     fn restore(&mut self) -> Result<()> {
         // Restore event counters
         {
-            let mut stmt = self
-                .conn
-                .prepare("SELECT process_namespace, process_app, process_proc, counter FROM event_counters")?;
+            let mut stmt = self.conn.prepare(
+                "SELECT process_namespace, process_app, process_proc, counter FROM event_counters",
+            )?;
             let rows = stmt.query_map([], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -899,7 +899,9 @@ impl Scheduler for PersistentScheduler {
             e.clone()
         } else if in_event_seq == 0 {
             let event_id = *self.inner.event_counter.entry(process.clone()).or_insert(0);
-            self.inner.event_counter.insert(process.clone(), event_id + 1);
+            self.inner
+                .event_counter
+                .insert(process.clone(), event_id + 1);
             self.save_event_counter(process, event_id + 1);
             EventId {
                 namespace: process.namespace.clone(),
@@ -923,10 +925,20 @@ impl Scheduler for PersistentScheduler {
             .satisfy_proposal(proposal, receipt, completes_proposal);
 
         if let Ok((ref action, ref new_proposals)) = result {
-            if let Some(last) = self.inner.event_chunks.get(&action.event).and_then(|v| v.last()) {
+            if let Some(last) = self
+                .inner
+                .event_chunks
+                .get(&action.event)
+                .and_then(|v| v.last())
+            {
                 self.save_receipt(&action.event, chunk_seq, last);
             }
-            if let Some(last) = self.inner.process_chunks.get(process).and_then(|v| v.last()) {
+            if let Some(last) = self
+                .inner
+                .process_chunks
+                .get(process)
+                .and_then(|v| v.last())
+            {
                 self.save_process_receipt(process, chunk_seq, last);
             }
 
@@ -949,7 +961,9 @@ impl Scheduler for PersistentScheduler {
                 } else {
                     // Notifications: persist as new proposals
                     let sched = self.inner.schedule.get(&p.process);
-                    let pos = sched.map(|s| (s.len() as u64).saturating_sub(1)).unwrap_or(0);
+                    let pos = sched
+                        .map(|s| (s.len() as u64).saturating_sub(1))
+                        .unwrap_or(0);
                     self.save_proposal(&p.process, pos, p);
                 }
             }
@@ -983,7 +997,9 @@ impl Scheduler for PersistentScheduler {
             }
             for p in new_proposals {
                 let sched = self.inner.schedule.get(&p.process);
-                let pos = sched.map(|s| (s.len() as u64).saturating_sub(1)).unwrap_or(0);
+                let pos = sched
+                    .map(|s| (s.len() as u64).saturating_sub(1))
+                    .unwrap_or(0);
                 self.save_proposal(&p.process, pos, p);
             }
         }

@@ -188,7 +188,11 @@ async fn test_basic_return() {
             event: None,
             input: mp("start"),
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 
@@ -242,7 +246,11 @@ async fn test_kv_and_sql() {
             event: None,
             input: mp("start"),
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 
@@ -358,7 +366,11 @@ async fn test_lua_error_satisfies() {
             event: None,
             input: mp("start"),
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 
@@ -411,7 +423,11 @@ async fn test_notify_routes_to_target() {
             event: None,
             input: mp("start"),
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 
@@ -483,7 +499,11 @@ async fn test_call_with_promise_resolution() {
             event: None,
             input: mp("start"),
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 
@@ -571,7 +591,11 @@ async fn test_concurrent_proposals_ordered() {
             event: None,
             input: mp("first"),
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
     env.scheduler
@@ -580,7 +604,11 @@ async fn test_concurrent_proposals_ordered() {
             event: None,
             input: mp("second"),
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 
@@ -734,7 +762,11 @@ async fn test_stateless_satisfy_resolves_promise() {
             event: None,
             input: mp("start"),
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 
@@ -829,7 +861,11 @@ async fn test_http_client_get() {
             event: None,
             input,
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 
@@ -920,7 +956,11 @@ async fn test_http_client_post() {
             event: None,
             input,
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 
@@ -981,7 +1021,11 @@ async fn test_http_server_routes_by_host_header() {
                 "host": "example.com",
             })),
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 
@@ -1110,13 +1154,18 @@ async fn test_auto_spawn_sends_init_notification() {
             event: None,
             input: mp("hello"),
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 
     // The original proposal (seq 0) is forwarded first since spawn_actor is synchronous
     // within the RouteProposal handler
-    let first_chunks = wait_for_chunks(&env.scheduler, event_first, 1, Duration::from_secs(2)).await;
+    let first_chunks =
+        wait_for_chunks(&env.scheduler, event_first, 1, Duration::from_secs(2)).await;
     assert_eq!(first_chunks.len(), 1);
     assert_eq!(first_chunks[0].status, RuntimeStatus::End);
     assert_eq!(first_chunks[0].returns, mp_data("hello"));
@@ -1145,16 +1194,11 @@ async fn test_blackbox_full_flow() {
     // Create a tar.gz package with arcanum.toml + main.lua on disk
     let code = br#"return { entrypoint = function(ctx, msg) return ctx.from end }"#;
     let toml = br#"name = "^test/echo""#;
-    let tarball = make_tar_gz_with_files(&[
-        ("main.lua", &code[..]),
-        ("arcanum.toml", &toml[..]),
-    ]);
+    let tarball = make_tar_gz_with_files(&[("main.lua", &code[..]), ("arcanum.toml", &toml[..])]);
     std::fs::write(store_dir.join("pkg.tar.gz"), &tarball).unwrap();
 
     // Open filesystem store (reads tar.gz, extracts arcanum.toml, registers name)
-    let store = StoreHandle::new(Box::new(
-        FileSystemPackageStore::open(&store_dir).unwrap(),
-    ));
+    let store = StoreHandle::new(Box::new(FileSystemPackageStore::open(&store_dir).unwrap()));
 
     // Name was auto-registered from arcanum.toml inside the tar.gz
     let names = store.list_names().await;
@@ -1206,7 +1250,11 @@ async fn test_blackbox_full_flow() {
                 "host": "example.com",
             })),
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 

@@ -165,14 +165,10 @@ pub fn spawn_per_process_state(process: &ProcessId, state_dir: &Path) -> StateHa
     StateHandle { sender }
 }
 
-async fn run_per_process_state(
-    mut rx: mpsc::UnboundedReceiver<StateMsg>,
-    db_path: PathBuf,
-) {
+async fn run_per_process_state(mut rx: mpsc::UnboundedReceiver<StateMsg>, db_path: PathBuf) {
     let mut kv: HashMap<String, String> = HashMap::new();
-    let conn = rusqlite::Connection::open(&db_path).unwrap_or_else(|e| {
-        panic!("failed to open state database {}: {}", db_path.display(), e)
-    });
+    let conn = rusqlite::Connection::open(&db_path)
+        .unwrap_or_else(|e| panic!("failed to open state database {}: {}", db_path.display(), e));
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS kv (
             key TEXT PRIMARY KEY,

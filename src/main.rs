@@ -30,13 +30,9 @@ async fn main() {
     // Persistent scheduler
     let (sched_tx, sched_rx) = mpsc::unbounded_channel();
     let scheduler = SchedulerHandle::from_sender(sched_tx);
-    let manager = ManagerHandle::new(
-        store.clone(),
-        scheduler.clone(),
-        config.state_dir(),
-    );
-    let persistent_scheduler =
-        PersistentScheduler::open(config.scheduler_db_path()).expect("failed to open scheduler database");
+    let manager = ManagerHandle::new(store.clone(), scheduler.clone(), config.state_dir());
+    let persistent_scheduler = PersistentScheduler::open(config.scheduler_db_path())
+        .expect("failed to open scheduler database");
     tokio::spawn(run_scheduler(
         sched_rx,
         Box::new(persistent_scheduler),
