@@ -339,14 +339,12 @@ impl FileSystemPackageStore {
                     Box::new(Cursor::new(&data[..]))
                 };
                 if let Ok(entries) = Archive::new(reader).entries() {
-                    for entry_result in entries {
-                        if let Ok(mut entry) = entry_result {
-                            if let Ok(path) = entry.path() {
-                                let path_str = path.to_string_lossy().into_owned();
-                                let mut contents = Vec::new();
-                                if entry.read_to_end(&mut contents).is_ok() {
-                                    self.cache.insert((key, path_str), contents.into());
-                                }
+                    for mut entry in entries.flatten() {
+                        if let Ok(path) = entry.path() {
+                            let path_str = path.to_string_lossy().into_owned();
+                            let mut contents = Vec::new();
+                            if entry.read_to_end(&mut contents).is_ok() {
+                                self.cache.insert((key, path_str), contents.into());
                             }
                         }
                     }
