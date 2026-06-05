@@ -5,7 +5,7 @@
 1. Read the pending chunk queue to find the next chunk to be processed
 2. Find the next chunk's corresponding event (and as such, in-memory execution)
 3. Step the execution forward: run until the next yield point
-  - If it makes syscalls, store them in the pending chunk's in-memory state
+ If it makes syscalls, store them in the pending chunk's in-memory state
 4. Push the chunk to the database
 
 ## Cross-App Communication

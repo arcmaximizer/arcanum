@@ -27,29 +27,29 @@ loop:
     1. proposal = dequeue from schedule
     
     2. event = ensure_event_running(proposal.event)
-       - if event doesn't exist, create it with status = Running
-       - this step is atomic with step 1
+      if event doesn't exist, create it with status = Running
+      this step is atomic with step 1
     
     3. while chunk = execute_to_yield(event):
-       - execution occurs in the executor until a yield point
-       - yields happen at async boundaries (network I/O, message passing)
+      execution occurs in the executor until a yield point
+      yields happen at async boundaries (network I/O, message passing)
        
        a. add chunk to log
        
        b. if chunk is a Receipt:
-          - remove proposal from schedule (atomic)
-          - add receipt to history (atomic)
-          - read receipt's effects vector
+         remove proposal from schedule (atomic)
+         add receipt to history (atomic)
+         read receipt's effects vector
           
           i. if effects contain a promise:
-             - route the return value to promise target
-             - create new proposal for target process
-             - pass return value as input to new event
-             - continue from step 1 (loop)
+            route the return value to promise target
+            create new proposal for target process
+            pass return value as input to new event
+            continue from step 1 (loop)
           
           ii. if no promise:
-               - event is complete
-               - break (loop exits)
+              event is complete
+              break (loop exits)
 ```
 
 ## Steps Detail
@@ -115,7 +115,7 @@ a global promises list when the call occurs.
   chunk and the creation of a receipt, completing the current proposal. The Lua
   thread is suspended until the callee returns.
 - **Non-completing syscalls** (all other syscalls) yield within the current
-  proposal — the Lua thread resumes immediately after the operation is handled.
+  proposal - the Lua thread resumes immediately after the operation is handled.
 
 ## Schedule Ordering
 

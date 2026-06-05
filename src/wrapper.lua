@@ -95,7 +95,11 @@ local function notify(target, ...)
 end
 
 function register(template, name)
-    local process_id = syscall("register", template, name)
+    local result = syscall("register", template, name)
+    if type(result) == "table" and result.error ~= nil then
+        error(result.error)
+    end
+    local process_id = result
     local ref = {
         _process = process_id,
         call = function(self, ...)

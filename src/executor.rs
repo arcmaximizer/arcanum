@@ -470,10 +470,26 @@ pub async fn run_executor(
                                 new_process,
                                 handler
                             );
-                            manager.register_process(new_process.clone(), handler);
-                            input = LuaValue::String(
-                                lua.create_string(new_process.to_string()).unwrap(),
-                            );
+                            match manager
+                                .register_process(new_process.clone(), handler)
+                                .await
+                            {
+                                Ok(()) => {
+                                    input = LuaValue::String(
+                                        lua.create_string(new_process.to_string())
+                                            .unwrap(),
+                                    );
+                                }
+                                Err(e) => {
+                                    input = bytes_to_mlua_value(
+                                        &lua,
+                                        &rmp_serde::to_vec(
+                                            &serde_json::json!({"error": e.to_string()}),
+                                        )
+                                        .unwrap_or_default(),
+                                    );
+                                }
+                            }
                         }
                     }
                 }

@@ -8,7 +8,7 @@ use arcanum::scheduler::{
     Syscall, run_scheduler,
 };
 use arcanum::store::{FileSystemPackageStore, InMemoryPackageStore, StoreHandle};
-use arcanum::types::{AppId, EventId, ProcessId};
+use arcanum::types::{AppId, EventId, HandlerId, ProcessId};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -182,17 +182,25 @@ async fn test_basic_return() {
     )
     .await;
 
+    env.manager
+        .register_process(
+            process.clone(),
+            HandlerId {
+                namespace: "test".into(),
+                app: "test".into(),
+                handler: "echo".into(),
+            },
+        )
+        .await
+        .unwrap();
+
     env.scheduler
         .add_proposal(Proposal {
             process: process.clone(),
             event: None,
             input: mp("start"),
             promise: None,
-            from: ProcessId {
-                namespace: String::new(),
-                app: String::new(),
-                proc: String::new(),
-            },
+            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
         })
         .await;
 
@@ -239,6 +247,18 @@ async fn test_kv_and_sql() {
         }"#,
     )
     .await;
+
+    env.manager
+        .register_process(
+            process.clone(),
+            HandlerId {
+                namespace: "test".into(),
+                app: "test".into(),
+                handler: "kvsqltest".into(),
+            },
+        )
+        .await
+        .unwrap();
 
     env.scheduler
         .add_proposal(Proposal {
@@ -359,6 +379,18 @@ async fn test_lua_error_satisfies() {
         r#"return { errtest = function(ctx, msg) error('boom') end }"#,
     )
     .await;
+
+    env.manager
+        .register_process(
+            process.clone(),
+            HandlerId {
+                namespace: "test".into(),
+                app: "test".into(),
+                handler: "errtest".into(),
+            },
+        )
+        .await
+        .unwrap();
 
     env.scheduler
         .add_proposal(Proposal {
@@ -744,11 +776,24 @@ async fn test_stateless_satisfy_resolves_promise() {
         "test",
         r#"return {
             caller = function(ctx, msg)
+                if msg == nil then return nil end
                 return call("^sys/http", msg)
             end,
         }"#,
     )
     .await;
+
+    env.manager
+        .register_process(
+            caller_proc.clone(),
+            HandlerId {
+                namespace: "test".into(),
+                app: "test".into(),
+                handler: "caller".into(),
+            },
+        )
+        .await
+        .unwrap();
 
     // Create a stateless channel (simulates an HTTP-like process)
     let (stateless_tx, mut stateless_rx) = mpsc::unbounded_channel();
@@ -845,11 +890,24 @@ async fn test_http_client_get() {
         "test",
         r#"return {
             caller = function(ctx, msg)
+                if msg == nil then return nil end
                 return call("^sys/http", msg)
             end,
         }"#,
     )
     .await;
+
+    env.manager
+        .register_process(
+            caller_proc.clone(),
+            HandlerId {
+                namespace: "test".into(),
+                app: "test".into(),
+                handler: "caller".into(),
+            },
+        )
+        .await
+        .unwrap();
 
     let input = msgpack_value(&serde_json::json!({
         "method": "GET",
@@ -938,11 +996,24 @@ async fn test_http_client_post() {
         "test",
         r#"return {
             caller = function(ctx, msg)
+                if msg == nil then return nil end
                 return call("^sys/http", msg)
             end,
         }"#,
     )
     .await;
+
+    env.manager
+        .register_process(
+            caller_proc.clone(),
+            HandlerId {
+                namespace: "test".into(),
+                app: "test".into(),
+                handler: "caller".into(),
+            },
+        )
+        .await
+        .unwrap();
 
     let input = msgpack_value(&serde_json::json!({
         "method": "POST",
@@ -966,6 +1037,17 @@ async fn test_http_client_post() {
 
     let chunks = wait_for_chunks(&env.scheduler, caller_event, 2, Duration::from_secs(5)).await;
     assert_eq!(chunks.len(), 2);
+
+    assert_eq!(chunks[0].status, RuntimeStatus::Normal);
+    assert_eq!(chunks[0].in_event_seq, 0);
+    assert!(matches!(
+        &chunks[0].syscalls[0],
+        Syscall::Call { proposal } if proposal.process == http_process
+    ));
+
+    assert_eq!(chunks[1].status, RuntimeStatus::End);
+    assert_eq!(chunks[1].in_event_seq, 1);
+    assert_eq!(chunks[1].syscalls, vec![]);
 
     let response: serde_json::Value = rmp_serde::from_slice(&chunks[1].returns).unwrap();
     assert_eq!(response["data"]["ok"], true);

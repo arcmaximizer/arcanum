@@ -3,6 +3,7 @@ use crate::scheduler::{Proposal, SchedulerHandle};
 use crate::state::{StateHandle, spawn_per_process_state};
 use crate::store::StoreHandle;
 use crate::types::{AppId, HandlerId, ProcessId};
+use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
@@ -31,6 +32,7 @@ pub enum ManagerMsg {
     RegisterProcess {
         process: ProcessId,
         handler: HandlerId,
+        resp: oneshot::Sender<Result<()>>,
     },
     SpawnActor {
         process: ProcessId,
@@ -87,10 +89,20 @@ impl ManagerHandle {
             .send(ManagerMsg::DeregisterStateless { process });
     }
 
-    pub fn register_process(&self, process: ProcessId, handler: HandlerId) {
-        let _ = self
-            .sender
-            .send(ManagerMsg::RegisterProcess { process, handler });
+    pub async fn register_process(
+        &self,
+        process: ProcessId,
+        handler: HandlerId,
+    ) -> Result<()> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(ManagerMsg::RegisterProcess {
+                process,
+                handler,
+                resp: resp_tx,
+            })
+            .map_err(|_| anyhow!("manager task has been killed"))?;
+        resp_rx.await.map_err(|_| anyhow!("manager task has been killed"))?
     }
 
     pub fn spawn_actor(&self, process: ProcessId) {
@@ -144,13 +156,30 @@ pub async fn run_manager(
                 tracing::debug!("manager: deregistered stateless {}", process);
                 stateless_senders.remove(&process);
             }
-            ManagerMsg::RegisterProcess { process, handler } => {
+            ManagerMsg::RegisterProcess {
+                process,
+                handler,
+                resp,
+            } => {
+                if let Some(existing) = handler_map.get(&process) {
+                    if existing != &handler {
+                        let _ = resp.send(Err(anyhow!(
+                            "process {} already registered under handler {}",
+                            process,
+                            existing.handler,
+                        )));
+                        continue;
+                    }
+                    let _ = resp.send(Ok(()));
+                    continue;
+                }
                 tracing::debug!(
                     "manager: registered process {} to handler {}",
                     process,
                     handler
                 );
-                handler_map.insert(process, handler);
+                handler_map.insert(process.clone(), handler);
+                let _ = resp.send(Ok(()));
             }
             ManagerMsg::GetStateHandle { process, resp } => {
                 let dir = state_dir.clone();
@@ -188,6 +217,17 @@ pub async fn run_manager(
                     continue;
                 }
 
+                // Only entrypoint processes or registered processes can be
+                // auto-created. All other processes must be registered first
+                // via register().
+                if process.proc != "entrypoint" && !handler_map.contains_key(process) {
+                    tracing::error!(
+                        "manager: cannot auto-create non-entrypoint process {}. \
+                         Use register() first.",
+                        process
+                    );
+                    continue;
+                }
                 if spawn_actor(
                     process,
                     &mut executor_senders,

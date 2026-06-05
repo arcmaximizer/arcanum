@@ -20,7 +20,7 @@ A package is a `.tar.gz` containing at least a `main.lua` file and an
 ### main.lua
 
 Your app returns a table mapping handler names to handler functions. The
-`entrypoint` handler is special — it runs when the app starts (see
+`entrypoint` handler is special - it runs when the app starts (see
 [Writing Apps](api.md#writing-apps) for details).
 
 ```lua
@@ -29,7 +29,7 @@ return {
         return "Hello from my app!"
     end,
     board = function(ctx, msg)
-        return "board says: " .. tostring(msg)
+        return "board" .. ctx.me .. " says: " .. tostring(msg)
     end,
 }
 ```
@@ -92,7 +92,7 @@ Arcanum will:
 
 ## Interacting with the Node
 
-Currently there is **no interactive shell** — `arcanum` runs as a daemon and
+Currently there is **no interactive shell** - `arcanum` runs as a daemon and
 exits on Ctrl+C.
 
 The HTTP server is running and can route requests to your apps, but routes must
@@ -132,14 +132,3 @@ curl -X POST http://127.0.0.1:6202/any-path \
   -H "Host: example.com" \
   -d "hello from curl"
 ```
-
-## What's Not Implemented
-
-These features are described in the docs but not yet built:
-
-- **Interactive shell** — no `arcanum install`, `sideload`, `update`, or
-  in-shell `sys/http-server add` commands
-- **Arcnet** — peer-to-peer networking between nodes
-- **App registry** — no public store to download packages from
-- **Package updates** — no version tracking or zero-downtime update mechanism
-- **Identity service** — no keypair registration or node naming
