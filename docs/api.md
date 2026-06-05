@@ -40,9 +40,10 @@ Events within a process are addressed by a four-part ID:
 | `handler` | — | The current handler's name within the process |
 | `app` | — | The current app ID (e.g. `^arc/cheeseboard`) |
 
-> **Warning**: Messages from over the network always arrive from a local system
-> process such as `^sys/net` or `^sys/http`. Check `ctx.from` and follow their
-> API contract instead of treating the remote sender as the origin.
+> **Note**: Messages from external sources always arrive from a local system
+> process such as `^sys/http-server` (or, in the future, `^sys/net`). Check
+> `ctx.from` and follow their API contract instead of treating the remote
+> sender as the origin.
 
 ## IPC: call & notify
 
@@ -173,6 +174,8 @@ then interact with it via `call` or `notify`.
 
 ## Arcnet
 
+> **Not yet implemented.** This section describes planned functionality.
+
 Arcnet is the peer-to-peer networking layer between Arcanum nodes. A process
 can expose itself over Arcnet by claiming a **port name** — an identifier that
 does not need to match the process or app name.
@@ -225,16 +228,21 @@ type ArcnetMessage = {
 
 ## HTTP Server
 
-Arcanum's built-in HTTP server listens on port 6202. Users can register URI
-bindings via the shell:
+Arcanum's built-in HTTP server listens on port 6202. Routes are registered by
+sending a message to the `^sys/http-server` process:
 
-```
-^arc: sys/http-server add arc/forum forum.example.org
-^arc: sys/http-server remove arc/forum forum.example.org
-^arc: sys/http-server list-uris arc/forum
+```lua
+notify("^sys/http-server", {
+    action = "add",
+    app = "my-namespace/my-app",
+    host = "example.com",
+})
 ```
 
-Processes may also register URI bindings programmatically at runtime.
+Supported actions: `add`, `remove`, `list-uris`.
+
+> The interactive shell (`^arc: sys/http-server add ...`) is not yet
+> implemented. Route registration from Lua is the current workaround.
 
 ## Writing Apps
 

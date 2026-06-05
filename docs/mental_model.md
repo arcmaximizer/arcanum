@@ -4,6 +4,11 @@ Arcanum is an event-sourced app runtime and personal server. It offers zero
 downtime deploys, over-the-air updates, node identity, NAT traversal, an HTTP
 server, event logging and significant extensibility.
 
+> **Status**: Arcanum is early-stage. The process model, IPC, KV/SQL storage,
+> HTTP client/server, and process lifecycle (`register`) work. Arcnet
+> (networking), the interactive shell, app registry, and package update flows
+> are not yet implemented.
+
 ## Prior Art
 
 - Erlang/OTP
