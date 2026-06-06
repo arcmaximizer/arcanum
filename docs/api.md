@@ -243,15 +243,89 @@ type ArcnetMessage = {
 Arcanum's built-in HTTP server listens on port 6202. Routes are registered by
 sending a message to the `^sys/http-server` process:
 
+Messages to `^sys/http-server`:
+
+```luau
+type HttpServerAction = "add" | "remove" | "list-uris"
+
+type HttpServerMessage = {
+    action: HttpServerAction,
+    app: string,   -- e.g. "my-namespace/my-app"
+    host: string?, -- required for add/remove
+}
+```
+
+### Actions
+
+| Action | Description |
+|--------|-------------|
+| `add` | Register a route — maps `host` to a process. The process defined in `app` will receive HTTP requests whose `Host` header matches. |
+| `remove` | Unregister a route. Returns the number of routes removed. |
+| `list-uris` | List all registered hosts for the given app. |
+
+### Responses
+
+Responses come back as the return value of `call()`:
+
+```luau
+-- add (success)
+{ ok: true }
+
+-- add (error — invalid process ID)
+{ error: string }
+
+-- remove
+{ ok: true, removed: number }
+
+-- list-uris
+{ uris: string[] }
+```
+
+### Incoming HTTP Requests
+
+When an HTTP request arrives for a registered route, the target process
+receives it from `^sys/http-server`:
+
+- `ctx.from` is `^sys/http-server`
+- `msg` is the HTTP body. If the body is valid JSON it is parsed as JSON;
+  otherwise it arrives as a string.
+- The Host header determines routing — the path is not used for routing but
+  can be handled by the app.
+
 ```lua
+function entrypoint(ctx, msg)
+    -- msg is the HTTP body (parsed from JSON if applicable)
+    return "response data"
+end
+```
+
+### HTTP Response
+
+The process's return value becomes the HTTP response:
+
+- If the handler returns `nil`: `204 No Content`
+- If the handler returns a value: `200 OK` with the handler's return value
+  wrapped in `{"data": ...}` as JSON.
+- If the handler errors: `500 Internal Server Error` with the error message.
+- If the handler takes longer than 30 seconds: `504 Gateway Timeout`.
+
+### Registration from Lua
+
+```lua
+-- Register a route
 notify("^sys/http-server", {
     action = "add",
     app = "my-namespace/my-app",
     host = "example.com",
 })
-```
 
-Supported actions: `add`, `remove`, `list-uris`.
+-- Remove a route
+call("^sys/http-server", {
+    action = "remove",
+    app = "my-namespace/my-app",
+    host = "example.com",
+})
+```
 
 > The interactive shell (`^arc: sys/http-server add ...`) is not yet
 > implemented. Route registration from Lua is the current workaround.
