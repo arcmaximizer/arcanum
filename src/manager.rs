@@ -89,11 +89,7 @@ impl ManagerHandle {
             .send(ManagerMsg::DeregisterStateless { process });
     }
 
-    pub async fn register_process(
-        &self,
-        process: ProcessId,
-        handler: HandlerId,
-    ) -> Result<()> {
+    pub async fn register_process(&self, process: ProcessId, handler: HandlerId) -> Result<()> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.sender
             .send(ManagerMsg::RegisterProcess {
@@ -102,7 +98,9 @@ impl ManagerHandle {
                 resp: resp_tx,
             })
             .map_err(|_| anyhow!("manager task has been killed"))?;
-        resp_rx.await.map_err(|_| anyhow!("manager task has been killed"))?
+        resp_rx
+            .await
+            .map_err(|_| anyhow!("manager task has been killed"))?
     }
 
     pub fn spawn_actor(&self, process: ProcessId) {

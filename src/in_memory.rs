@@ -1,5 +1,5 @@
-use crate::state::{msgpack_params_to_sqlite, sqlite_value_to_json, StateMsg};
-use crate::store::{detect_tar, package_name_from_toml, HashKey, PackageStore};
+use crate::state::{StateMsg, msgpack_params_to_sqlite, sqlite_value_to_json};
+use crate::store::{HashKey, PackageStore, detect_tar, package_name_from_toml};
 use crate::types::ProcessId;
 use anyhow::Result;
 use bytes::Bytes;
@@ -211,5 +211,3 @@ pub async fn run_state(mut rx: mpsc::UnboundedReceiver<StateMsg>, mut state: InM
         }
     }
 }
-
-

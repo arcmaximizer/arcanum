@@ -253,5 +253,3 @@ async fn run_per_process_state(mut rx: mpsc::UnboundedReceiver<StateMsg>, db_pat
         }
     }
 }
-
-

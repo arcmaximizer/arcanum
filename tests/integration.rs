@@ -200,7 +200,11 @@ async fn test_basic_return() {
             event: None,
             input: mp("start"),
             promise: None,
-            from: ProcessId { namespace: String::new(), app: String::new(), proc: String::new() },
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
         })
         .await;
 
