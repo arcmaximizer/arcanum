@@ -6,7 +6,6 @@ use arcanum::scheduler::{PersistentScheduler, SchedulerHandle, run_scheduler};
 use arcanum::store::{FileSystemPackageStore, StoreHandle};
 use arcanum::types::{AppId, ProcessId};
 use tokio::sync::mpsc;
-use tokio::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
