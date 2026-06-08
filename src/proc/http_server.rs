@@ -207,7 +207,10 @@ async fn handle_request(
         from: state.process.clone(),
     };
 
-    state.scheduler.add_proposal(proposal).await;
+    let proposal = state.scheduler.add_proposal(proposal).await;
+    let event = proposal
+        .event
+        .expect("Scheduler should have allocated event ID");
 
     let start = std::time::Instant::now();
     let timeout = Duration::from_secs(30);

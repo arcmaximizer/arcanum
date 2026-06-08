@@ -11,7 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 pub enum SchedulerMsg {
     AddProposal {
         proposal: Proposal,
-        resp: tokio::sync::oneshot::Sender<u64>,
+        resp: tokio::sync::oneshot::Sender<Proposal>,
     },
     GetNext {
         process: ProcessId,
@@ -58,16 +58,21 @@ pub async fn run_scheduler(
 
     while let Some(msg) = rx.recv().await {
         match msg {
-            SchedulerMsg::AddProposal { proposal, resp } => {
-                let id = scheduler.add_proposal(proposal.clone());
+            SchedulerMsg::AddProposal { mut proposal, resp } => {
+                if proposal.event.is_none() {
+                    let event_id = scheduler.allocate_event_id(&proposal.process);
+                    proposal.event = Some(event_id);
+                }
+
+                scheduler.add_proposal(proposal.clone());
 
                 // Desync bug: if the schedule on the scheduler side has elements
                 // but it is different from the channel on the manager side, then
                 // this will result in out of order proposal execution and then
                 // the scheduler failing a check
-                manager.route_proposal(proposal);
+                manager.route_proposal(proposal.clone());
 
-                let _ = resp.send(id);
+                let _ = resp.send(proposal);
             }
             SchedulerMsg::GetNext { process, resp } => {
                 let proposal = scheduler.get_next_proposal(&process).cloned();
@@ -176,7 +181,7 @@ impl SchedulerHandle {
         Self { sender }
     }
 
-    pub async fn add_proposal(&self, proposal: Proposal) -> u64 {
+    pub async fn add_proposal(&self, proposal: Proposal) -> Proposal {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.sender
             .send(SchedulerMsg::AddProposal {
@@ -342,6 +347,7 @@ pub struct NextAction {
 
 pub trait Scheduler {
     fn add_proposal(&mut self, proposal: Proposal) -> u64;
+    fn allocate_event_id(&mut self, process: &ProcessId) -> EventId;
     fn get_next_proposal(&mut self, process: &ProcessId) -> Option<&Proposal>;
     fn get_next_event_id(&mut self, process: &ProcessId) -> EventId;
     fn get_log_seq(&self, process: &ProcessId) -> u64;
@@ -391,6 +397,16 @@ impl Scheduler for InMemoryScheduler {
 
         schedule.push_back(proposal);
         (schedule.len() - 1) as u64
+    }
+    fn allocate_event_id(&mut self, process: &ProcessId) -> EventId {
+        let seq = *self.event_counter.entry(process.clone()).or_insert(0);
+        self.event_counter.insert(process.clone(), seq + 1);
+        EventId {
+            namespace: process.namespace.clone(),
+            app: process.app.clone(),
+            proc: process.proc.clone(),
+            seq,
+        }
     }
     fn get_next_proposal(&mut self, process: &ProcessId) -> Option<&Proposal> {
         self.schedule.get(process)?.front()
@@ -900,6 +916,14 @@ impl Scheduler for PersistentScheduler {
         let position = self.inner.add_proposal(proposal.clone());
         self.save_proposal(&proposal.process, position, &proposal);
         position
+    }
+
+    fn allocate_event_id(&mut self, process: &ProcessId) -> EventId {
+        let event_id = self.inner.allocate_event_id(process);
+        if let Some(&counter) = self.inner.event_counter.get(process) {
+            self.save_event_counter(process, counter);
+        }
+        event_id
     }
 
     fn get_next_proposal(&mut self, process: &ProcessId) -> Option<&Proposal> {
