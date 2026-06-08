@@ -1,13 +1,14 @@
 use std::io::Write;
 use std::time::{Duration, Instant};
 
+use arcanum::in_memory::InMemoryPackageStore;
 use arcanum::manager::ManagerHandle;
 use arcanum::proc::http::HttpHandle;
 use arcanum::scheduler::{
     InMemoryScheduler, PersistentScheduler, Proposal, Receipt, RuntimeStatus, SchedulerHandle,
     Syscall, run_scheduler,
 };
-use arcanum::store::{FileSystemPackageStore, InMemoryPackageStore, StoreHandle};
+use arcanum::store::{FileSystemPackageStore, StoreHandle};
 use arcanum::types::{AppId, EventId, HandlerId, ProcessId};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
