@@ -1,10 +1,12 @@
+@CONTRIBUTING.md
+
 # Agent Instructions
 
 ## Committing
 
 - Use Conventional Commits
 - Follow commit best practice: not too granular, not too big
-- Use `cargo fmt` to format all code
+- Use `cargo fmt` to format all code, always lint
 
 ## Other Instructions
 
