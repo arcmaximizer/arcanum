@@ -7,7 +7,7 @@ use axum::{
     extract::State,
     http::HeaderMap,
     response::{IntoResponse, Response},
-    routing::post,
+    routing::any,
 };
 use reqwest::StatusCode;
 use tokio::sync::{RwLock, mpsc};
@@ -85,7 +85,8 @@ async fn run(
     };
 
     let app = Router::new()
-        .route("/{*path}", post(handle_request))
+        .route("/", any(handle_request))
+        .route("/{*path}", any(handle_request))
         .with_state(state);
 
     tokio::spawn(handle_process_messages(
@@ -116,6 +117,11 @@ async fn handle_process_messages(
                 let host = input["host"].as_str().unwrap_or("");
                 match ProcessId::try_from(app_str) {
                     Ok(pid) => {
+                        tracing::debug!(
+                            "http_server: registerd route {} for process {}",
+                            host,
+                            pid
+                        );
                         routes.write().await.push((host.to_string(), pid));
                         serde_json::json!({"ok": true})
                     }
@@ -180,17 +186,22 @@ async fn handle_request(
             .map(|(_, p)| p.clone())
     };
 
+    tracing::debug!(
+        "http_server: handling request to host {}, state routes {:?}",
+        host,
+        state.routes.read().await
+    );
+
     let process = match process {
         Some(p) => p,
         None => return (StatusCode::NOT_FOUND, "no route for host").into_response(),
     };
 
-    let event = state.scheduler.get_next_event_id(process.clone()).await;
     let input = body_to_msgpack(&body);
 
     let proposal = Proposal {
         process: process.clone(),
-        event: Some(event.clone()),
+        event: None,
         input,
         promise: None,
         from: state.process.clone(),

@@ -47,13 +47,27 @@ pub async fn run_scheduler(
     mut scheduler: Box<dyn Scheduler + Send>,
     manager: ManagerHandle,
 ) {
+    // Sync up the manager first
+    let pending = scheduler.get_next_proposals();
+    let len = pending.len();
+    for prop in pending {
+        manager.route_proposal(prop.clone());
+    }
+
+    tracing::debug!("Manager synced with {} proposals", len);
+
     while let Some(msg) = rx.recv().await {
         match msg {
             SchedulerMsg::AddProposal { proposal, resp } => {
                 let id = scheduler.add_proposal(proposal.clone());
-                let _ = resp.send(id);
 
+                // Desync bug: if the schedule on the scheduler side has elements
+                // but it is different from the channel on the manager side, then
+                // this will result in out of order proposal execution and then
+                // the scheduler failing a check
                 manager.route_proposal(proposal);
+
+                let _ = resp.send(id);
             }
             SchedulerMsg::GetNext { process, resp } => {
                 let proposal = scheduler.get_next_proposal(&process).cloned();
@@ -344,6 +358,7 @@ pub trait Scheduler {
         proposal: &Proposal,
         returns: Vec<u8>,
     ) -> Result<(NextAction, Vec<Proposal>)>;
+    fn get_next_proposals(&self) -> Vec<&Proposal>;
 }
 
 #[derive(Default)]
@@ -361,6 +376,16 @@ impl InMemoryScheduler {
 }
 
 impl Scheduler for InMemoryScheduler {
+    fn get_next_proposals(&self) -> Vec<&Proposal> {
+        let mut list: Vec<&Proposal> = vec![];
+        for (_, val) in self.schedule.iter() {
+            if let Some(value) = val.front() {
+                list.push(value);
+            }
+        }
+        list
+    }
+
     fn add_proposal(&mut self, proposal: Proposal) -> u64 {
         let schedule = self.schedule.entry(proposal.process.clone()).or_default();
 
@@ -429,6 +454,8 @@ impl Scheduler for InMemoryScheduler {
             .front()
             .ok_or(anyhow!("No proposals exist in schedule"))?
             .clone();
+
+        tracing::debug!("Proposals: {:?}", schedule);
 
         if *proposal != first_proposal {
             bail!("Proposal does not match first scheduled proposal")
@@ -617,6 +644,7 @@ impl Scheduler for InMemoryScheduler {
     }
 }
 
+/// TODO OPTIMIZE THIS - IT SHOULD NOT HAVE TO LOAD ENTIRE DB
 /// A scheduler that wraps InMemoryScheduler and persists all state to SQLite.
 /// On creation, it restores previous state from the database.
 pub struct PersistentScheduler {
@@ -864,6 +892,10 @@ impl PersistentScheduler {
 }
 
 impl Scheduler for PersistentScheduler {
+    fn get_next_proposals(&self) -> Vec<&Proposal> {
+        self.inner.get_next_proposals()
+    }
+
     fn add_proposal(&mut self, proposal: Proposal) -> u64 {
         let position = self.inner.add_proposal(proposal.clone());
         self.save_proposal(&proposal.process, position, &proposal);

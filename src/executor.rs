@@ -314,6 +314,7 @@ pub async fn run_executor(
     let mut event_seqs: HashMap<types::EventId, u64> = HashMap::new();
 
     while let Some(proposal) = work_rx.recv().await {
+        tracing::debug!("Original proposal received: {:?}", proposal);
         if let Some(ref promise) = proposal.promise {
             tracing::debug!(
                 "Received proposal: process={} {} input={}",
@@ -390,6 +391,8 @@ pub async fn run_executor(
                         event,
                         completes_proposal
                     );
+
+                    tracing::debug!("Right before satisfy, full proposal {:?}", proposal);
 
                     scheduler
                         .satisfy(proposal.clone(), receipt, completes_proposal)
@@ -470,14 +473,10 @@ pub async fn run_executor(
                                 new_process,
                                 handler
                             );
-                            match manager
-                                .register_process(new_process.clone(), handler)
-                                .await
-                            {
+                            match manager.register_process(new_process.clone(), handler).await {
                                 Ok(()) => {
                                     input = LuaValue::String(
-                                        lua.create_string(new_process.to_string())
-                                            .unwrap(),
+                                        lua.create_string(new_process.to_string()).unwrap(),
                                     );
                                 }
                                 Err(e) => {

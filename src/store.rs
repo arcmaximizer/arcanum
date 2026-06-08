@@ -177,79 +177,6 @@ pub trait PackageStore {
     fn list_names(&self) -> Vec<String>;
 }
 
-#[derive(Default)]
-pub struct InMemoryPackageStore {
-    names: HashMap<String, HashKey>,
-    packages: HashMap<HashKey, Bytes>,
-    cache: HashMap<(HashKey, String), Bytes>,
-}
-
-impl InMemoryPackageStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
-impl PackageStore for InMemoryPackageStore {
-    fn resolve_name(&self, name: &str) -> Option<HashKey> {
-        self.names.get(name).copied()
-    }
-    fn set_name(&mut self, name: &str, key: HashKey) {
-        self.names.insert(name.to_string(), key);
-    }
-    fn get_package(&self, key: &HashKey) -> Option<Bytes> {
-        self.packages.get(key).cloned()
-    }
-    fn add_package(&mut self, value: Bytes) -> Result<HashKey> {
-        let key: HashKey = Sha256::digest(&value).into();
-        let format = detect_tar(&value);
-
-        if format.is_none() {
-            anyhow::bail!("Invalid tarball")
-        }
-        if self.packages.contains_key(&key) {
-            anyhow::bail!("Package already exists")
-        }
-
-        self.packages.insert(key, value.clone());
-
-        let format = format.unwrap();
-        let reader: Box<dyn Read> = if format == ".tar.gz" {
-            Box::new(GzDecoder::new(&value[..]))
-        } else {
-            Box::new(Cursor::new(&value[..]))
-        };
-        let mut archive = Archive::new(reader);
-        for entry in archive.entries().map_err(|e| anyhow::anyhow!("{}", e))? {
-            let mut entry = entry.map_err(|e| anyhow::anyhow!("{}", e))?;
-            let path = entry.path().map_err(|e| anyhow::anyhow!("{}", e))?;
-            let path_str = path.to_string_lossy().into_owned();
-            let mut contents = Vec::new();
-            entry
-                .read_to_end(&mut contents)
-                .map_err(|e| anyhow::anyhow!("{}", e))?;
-            self.cache.insert((key, path_str), contents.into());
-        }
-
-        // Auto-register name from arcanum.toml
-        if let Some(name) = self
-            .cache
-            .get(&(key, "arcanum.toml".into()))
-            .and_then(|d| package_name_from_toml(d))
-        {
-            self.names.insert(name, key);
-        }
-
-        Ok(key)
-    }
-    fn get_asset(&self, key: &HashKey, asset: &str) -> Option<Bytes> {
-        self.cache.get(&(*key, asset.to_string())).cloned()
-    }
-    fn list_names(&self) -> Vec<String> {
-        self.names.keys().cloned().collect()
-    }
-}
-
 pub struct FileSystemPackageStore {
     dir: PathBuf,
     names: HashMap<String, HashKey>,
@@ -452,7 +379,7 @@ struct ArcanumToml {
     package: Option<ArcanumPkg>,
 }
 
-fn package_name_from_toml(data: &[u8]) -> Option<String> {
+pub(crate) fn package_name_from_toml(data: &[u8]) -> Option<String> {
     let toml_str = String::from_utf8_lossy(data);
     let root: ArcanumToml = toml::from_str(&toml_str).ok()?;
     let raw = root.name.or_else(|| root.package.and_then(|p| p.name))?;
@@ -463,7 +390,7 @@ fn package_name_from_toml(data: &[u8]) -> Option<String> {
     }
 }
 
-fn detect_tar(data: &Bytes) -> Option<&'static str> {
+pub(crate) fn detect_tar(data: &Bytes) -> Option<&'static str> {
     if data.len() < 2 {
         return None;
     }
