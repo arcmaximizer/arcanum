@@ -1,5 +1,6 @@
-use std::io::{BufRead, Write};
+use std::path::PathBuf;
 
+use rustyline::{DefaultEditor, error::ReadlineError};
 use serde_json::Value as JsonValue;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -39,32 +40,7 @@ async fn run_one_shot(host: &str, port: u16, args: &[String]) {
         None => return,
     };
 
-    let req = serde_json::json!({
-        "type": msg_type,
-        "target": target,
-        "data": data,
-    });
-    let req_bytes = rmp_serde::to_vec(&req).unwrap();
-
-    if send_frame(&mut stream, &req_bytes).await.is_err() {
-        eprintln!("error: failed to send request");
-        return;
-    }
-
-    match read_frame(&mut stream).await {
-        Some(resp_bytes) => match rmp_serde::from_slice::<JsonValue>(&resp_bytes) {
-            Ok(v) => {
-                let formatted = serde_json::to_string_pretty(&v).unwrap_or_else(|_| format!("{v}"));
-                println!("{formatted}");
-            }
-            Err(_) => {
-                println!("{}", String::from_utf8_lossy(&resp_bytes));
-            }
-        },
-        None => {
-            eprintln!("error: no response from server");
-        }
-    }
+    execute(&mut stream, &msg_type, &target, &data).await;
 }
 
 fn parse_args(args: &[String]) -> Option<(String, String, String)> {
@@ -98,29 +74,53 @@ fn parse_data(input: &str) -> JsonValue {
     JsonValue::String(trimmed.to_string())
 }
 
-async fn run_repl(host: String, port: u16) {
-    println!("Arcanum shell — {host}:{port}");
-    println!("Type 'help' for commands, 'exit' to quit.");
+fn history_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".arcanum_shell_history")
+}
 
-    let stdin = std::io::stdin();
-    let mut stdout = std::io::stdout();
+async fn run_repl(host: String, port: u16) {
+    let mut rl = match DefaultEditor::new() {
+        Ok(ed) => ed,
+        Err(e) => {
+            eprintln!("error initializing line editor: {e}");
+            return;
+        }
+    };
+
+    let history_file = history_path();
+    let _ = rl.load_history(history_file.as_path());
+
+    println!("Arcanum shell — {host}:{port}");
+    println!("Type 'help' for commands, Ctrl-D or 'exit' to quit.");
+    println!();
+
     let mut stream: Option<TcpStream> = None;
 
     loop {
-        print!("> ");
-        stdout.flush().ok();
-
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => break, // EOF
-            Ok(_) => {}
-            Err(_) => break,
-        }
+        let line = match rl.readline("> ") {
+            Ok(line) => line,
+            Err(ReadlineError::Interrupted) => {
+                println!("^C");
+                continue;
+            }
+            Err(ReadlineError::Eof) => {
+                println!();
+                break;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                break;
+            }
+        };
 
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
+
+        let _ = rl.add_history_entry(trimmed);
 
         if handle_builtin(trimmed) {
             continue;
@@ -151,7 +151,6 @@ async fn run_repl(host: String, port: u16) {
         };
         let data = parse_data(&data_str);
 
-        // Connect lazily or reconnect if needed
         if stream.is_none() {
             stream = connect(&host, port).await;
         }
@@ -161,52 +160,65 @@ async fn run_repl(host: String, port: u16) {
             None => continue,
         };
 
-        let req = serde_json::json!({
-            "type": msg_type,
-            "target": target,
-            "data": data,
-        });
-        let req_bytes = rmp_serde::to_vec(&req).unwrap();
+        execute(s, &msg_type, target, &data).await;
+    }
 
-        if send_frame(s, &req_bytes).await.is_err() {
-            eprintln!("error: connection lost");
-            stream = None;
-            continue;
+    let _ = rl.save_history(history_file.as_path());
+}
+
+async fn execute(stream: &mut TcpStream, msg_type: &str, target: &str, data: &JsonValue) {
+    let req = serde_json::json!({
+        "type": msg_type,
+        "target": target,
+        "data": data,
+    });
+    let req_bytes = rmp_serde::to_vec(&req).unwrap();
+
+    if send_frame(stream, &req_bytes).await.is_err() {
+        eprintln!("error: connection lost");
+        return;
+    }
+
+    match read_frame(stream).await {
+        Some(resp_bytes) => match rmp_serde::from_slice::<JsonValue>(&resp_bytes) {
+            Ok(v) => print_response(&v),
+            Err(_) => {
+                println!("{}", String::from_utf8_lossy(&resp_bytes));
+            }
+        },
+        None => {
+            eprintln!("error: no response from server");
         }
+    }
+}
 
-        match read_frame(s).await {
-            Some(resp_bytes) => match rmp_serde::from_slice::<JsonValue>(&resp_bytes) {
-                Ok(v) => {
-                    if let Some(obj) = v.as_object() {
-                        if obj.get("ok") == Some(&JsonValue::Bool(true)) {
-                            if let Some(data) = obj.get("data") {
-                                let formatted = serde_json::to_string_pretty(data)
-                                    .unwrap_or_else(|_| format!("{data}"));
-                                println!("{formatted}");
-                            } else {
-                                println!("ok");
-                            }
-                        } else if let Some(err) = obj.get("error") {
-                            println!("error: {}", err.as_str().unwrap_or("unknown"));
-                        }
-                    } else {
-                        let formatted =
-                            serde_json::to_string_pretty(&v).unwrap_or_else(|_| format!("{v}"));
+fn print_response(v: &JsonValue) {
+    if let Some(obj) = v.as_object() {
+        if obj.get("ok") == Some(&JsonValue::Bool(true)) {
+            if let Some(data) = obj.get("data") {
+                match data {
+                    JsonValue::Null => println!("null"),
+                    JsonValue::String(s) => println!("{s}"),
+                    _ => {
+                        let formatted = serde_json::to_string_pretty(data)
+                            .unwrap_or_else(|_| format!("{data}"));
                         println!("{formatted}");
                     }
                 }
-                Err(_) => {
-                    println!("{}", String::from_utf8_lossy(&resp_bytes));
-                }
-            },
-            None => {
-                eprintln!("error: connection lost");
-                stream = None;
+            } else {
+                println!("ok");
             }
+        } else if let Some(err) = obj.get("error") {
+            println!("error: {}", err.as_str().unwrap_or("unknown"));
+        } else {
+            // Fallback: pretty print the whole thing
+            let formatted = serde_json::to_string_pretty(v).unwrap_or_else(|_| format!("{v}"));
+            println!("{formatted}");
         }
+    } else {
+        let formatted = serde_json::to_string_pretty(v).unwrap_or_else(|_| format!("{v}"));
+        println!("{formatted}");
     }
-
-    println!();
 }
 
 fn handle_builtin(line: &str) -> bool {
@@ -255,7 +267,7 @@ fn shell_tokenize(input: &str) -> Vec<String> {
                 i += 1;
             }
             if i < chars.len() {
-                i += 1; // skip closing quote
+                i += 1;
             }
             tokens.push(token);
         } else {
