@@ -5,11 +5,13 @@ use serde_json::Value as JsonValue;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-pub async fn run(host: String, port: u16, one_shot: Vec<String>) {
+const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+pub async fn run(host: String, port: u16, default_timeout_secs: u64, one_shot: Vec<String>) {
     if !one_shot.is_empty() {
-        run_one_shot(&host, port, &one_shot).await;
+        run_one_shot(&host, port, default_timeout_secs, &one_shot).await;
     } else {
-        run_repl(host, port).await;
+        run_repl(host, port, default_timeout_secs).await;
     }
 }
 
@@ -23,7 +25,7 @@ async fn connect(host: &str, port: u16) -> Option<TcpStream> {
     }
 }
 
-async fn run_one_shot(host: &str, port: u16, args: &[String]) {
+async fn run_one_shot(host: &str, port: u16, timeout_secs: u64, args: &[String]) {
     let (msg_type, target, data_str) = match parse_args(args) {
         Some(v) => v,
         None => {
@@ -40,7 +42,7 @@ async fn run_one_shot(host: &str, port: u16, args: &[String]) {
         None => return,
     };
 
-    execute(&mut stream, &msg_type, &target, &data).await;
+    execute(&mut stream, &msg_type, &target, &data, timeout_secs).await;
 }
 
 fn parse_args(args: &[String]) -> Option<(String, String, String)> {
@@ -80,7 +82,7 @@ fn history_path() -> PathBuf {
         .join(".arcanum_shell_history")
 }
 
-async fn run_repl(host: String, port: u16) {
+async fn run_repl(host: String, port: u16, default_timeout_secs: u64) {
     let mut rl = match DefaultEditor::new() {
         Ok(ed) => ed,
         Err(e) => {
@@ -126,7 +128,7 @@ async fn run_repl(host: String, port: u16) {
             continue;
         }
 
-        let tokens = shell_tokenize(trimmed);
+        let (timeout_secs, tokens) = extract_timeout(shell_tokenize(trimmed), default_timeout_secs);
         if tokens.is_empty() {
             continue;
         }
@@ -139,7 +141,7 @@ async fn run_repl(host: String, port: u16) {
         }
 
         if tokens.len() < 2 {
-            println!("usage: {msg_type} <target> [data]");
+            println!("usage: {msg_type} [--timeout <s>] <target> [data]");
             continue;
         }
 
@@ -160,17 +162,54 @@ async fn run_repl(host: String, port: u16) {
             None => continue,
         };
 
-        execute(s, &msg_type, target, &data).await;
+        execute(s, &msg_type, target, &data, timeout_secs).await;
     }
 
     let _ = rl.save_history(history_file.as_path());
 }
 
-async fn execute(stream: &mut TcpStream, msg_type: &str, target: &str, data: &JsonValue) {
+fn extract_timeout(tokens: Vec<String>, default_secs: u64) -> (u64, Vec<String>) {
+    let mut timeout = default_secs;
+    let mut remaining = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if (tokens[i] == "--timeout" || tokens[i] == "-t") && i + 1 < tokens.len() {
+            if let Ok(s) = tokens[i + 1].parse::<u64>() {
+                timeout = s;
+                i += 2;
+                continue;
+            }
+        } else if let Some(s) = tokens[i].strip_prefix("-t") {
+            if let Ok(ms) = s.parse::<u64>() {
+                timeout = ms;
+                i += 1;
+                continue;
+            }
+        } else if let Some(s) = tokens[i].strip_prefix("--timeout=") {
+            if let Ok(ms) = s.parse::<u64>() {
+                timeout = ms;
+                i += 1;
+                continue;
+            }
+        }
+        remaining.push(tokens[i].clone());
+        i += 1;
+    }
+    (timeout, remaining)
+}
+
+async fn execute(
+    stream: &mut TcpStream,
+    msg_type: &str,
+    target: &str,
+    data: &JsonValue,
+    timeout_secs: u64,
+) {
     let req = serde_json::json!({
         "type": msg_type,
         "target": target,
         "data": data,
+        "timeoutMs": timeout_secs * 1000,
     });
     let req_bytes = rmp_serde::to_vec(&req).unwrap();
 
@@ -211,7 +250,6 @@ fn print_response(v: &JsonValue) {
         } else if let Some(err) = obj.get("error") {
             println!("error: {}", err.as_str().unwrap_or("unknown"));
         } else {
-            // Fallback: pretty print the whole thing
             let formatted = serde_json::to_string_pretty(v).unwrap_or_else(|_| format!("{v}"));
             println!("{formatted}");
         }
@@ -228,10 +266,13 @@ fn handle_builtin(line: &str) -> bool {
     }
     if lower == "help" {
         println!("commands:");
-        println!("  call <target> [data]     send a message and wait for response");
-        println!("  notify <target> [data]   send a message without waiting");
-        println!("  help                     show this help");
-        println!("  exit, quit               exit the shell");
+        println!("  call [--timeout <s>] <target> [data]     send a message and wait for response");
+        println!("  notify <target> [data]                   send a message without waiting");
+        println!("  help                                     show this help");
+        println!("  exit, quit                               exit the shell");
+        println!();
+        println!("options:");
+        println!("  --timeout, -t <s>  call timeout in seconds (default: {DEFAULT_TIMEOUT_SECS})");
         println!();
         println!("target: ^namespace/app[/process]   (omit /process to target entrypoint)");
         println!("data:   json value or plain string (default: null)");

@@ -1553,7 +1553,49 @@ async fn test_mgmt_call_and_notify() {
     );
 }
 
-// --- Test 15: Management server notifies deliver ---
+// --- Test 15: Management server call timeout ---
+
+#[tokio::test]
+async fn test_mgmt_call_timeout() {
+    let env = setup();
+
+    add_package(
+        &env.store,
+        "test",
+        "timeout-app",
+        r#"return {
+            entrypoint = function(ctx, msg)
+                -- This call will never resolve (no such process) so the caller suspends
+                return call("^test/timeout-app/noone", "hello")
+            end,
+        }"#,
+    )
+    .await;
+
+    let mgmt = MgmtHandle::new(env.scheduler.clone(), 0).await;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", mgmt.port))
+        .await
+        .unwrap();
+
+    // Call with a 100ms timeout — the inner call() suspends forever, so the
+    // management server should hit its timeout before the process finishes.
+    send_mgmt_frame(
+        &mut stream,
+        &serde_json::json!({
+            "type": "call",
+            "target": "^test/timeout-app",
+            "data": null,
+            "timeoutMs": 100,
+        }),
+    )
+    .await;
+
+    let resp = read_mgmt_frame(&mut stream).await;
+    assert_eq!(resp["ok"], false);
+    assert_eq!(resp["error"], "timeout");
+}
+
+// --- Test 16: Management server notifies deliver ---
 
 #[tokio::test]
 async fn test_mgmt_notify_delivers_to_target() {
@@ -1639,7 +1681,7 @@ async fn test_mgmt_notify_delivers_to_target() {
     assert_eq!(received, "fire-and-forget");
 }
 
-// --- Test 16: Management server multiple concurrent connections ---
+// --- Test 17: Management server multiple concurrent connections ---
 
 #[tokio::test]
 async fn test_mgmt_multiple_connections() {

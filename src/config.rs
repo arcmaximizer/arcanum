@@ -119,6 +119,9 @@ pub enum Command {
         /// Management server port
         #[arg(long, default_value_t = 6203)]
         port: u16,
+        /// Call timeout in seconds (default: 30)
+        #[arg(short = 't', long, default_value_t = 30)]
+        timeout: u64,
         /// Run a single command (call/notify) and exit
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,

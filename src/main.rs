@@ -18,8 +18,14 @@ async fn main() {
 
     let cli = CliArgs::parse();
 
-    if let Some(config::Command::Shell { host, port, args }) = cli.command {
-        arcanum::shell::run(host, port, args).await;
+    if let Some(config::Command::Shell {
+        host,
+        port,
+        timeout,
+        args,
+    }) = cli.command
+    {
+        arcanum::shell::run(host, port, timeout, args).await;
         return;
     }
 

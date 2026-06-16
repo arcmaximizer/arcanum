@@ -12,6 +12,12 @@ struct MgmtRequest {
     target: String,
     #[serde(default)]
     data: serde_json::Value,
+    #[serde(default = "default_timeout_ms")]
+    timeout_ms: u64,
+}
+
+fn default_timeout_ms() -> u64 {
+    30_000
 }
 
 pub struct MgmtHandle {
@@ -119,7 +125,7 @@ async fn handle_message(
     let input = rmp_serde::to_vec(&req.data).unwrap_or_default();
 
     match req.msg_type.as_str() {
-        "call" => handle_call(scheduler, mgmt_process, target, input).await,
+        "call" => handle_call(scheduler, mgmt_process, target, input, req.timeout_ms).await,
         "notify" => {
             let proposal = Proposal {
                 process: target,
@@ -140,6 +146,7 @@ async fn handle_call(
     mgmt_process: &ProcessId,
     target: ProcessId,
     input: Vec<u8>,
+    timeout_ms: u64,
 ) -> Vec<u8> {
     let proposal = Proposal {
         process: target.clone(),
@@ -156,7 +163,7 @@ async fn handle_call(
     };
 
     let start = std::time::Instant::now();
-    let timeout = Duration::from_secs(30);
+    let timeout = Duration::from_millis(timeout_ms);
 
     loop {
         if start.elapsed() > timeout {
