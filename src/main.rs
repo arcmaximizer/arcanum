@@ -89,6 +89,23 @@ async fn main() {
         }
     }
 
+    // Poll the store directory for package updates
+    let store_poll = store.clone();
+    let mgr_poll = manager.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            let updated = store_poll.rescan().await;
+            for name in updated {
+                if let Ok(app_id) = AppId::try_from(name.as_str()) {
+                    tracing::info!("hot-reload: detected update for {}", app_id);
+                    mgr_poll.respawn_app(app_id);
+                }
+            }
+        }
+    });
+
     // Keep running
     tokio::signal::ctrl_c().await.unwrap();
 }

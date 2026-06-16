@@ -44,6 +44,9 @@ pub enum ManagerMsg {
         process: ProcessId,
         resp: oneshot::Sender<StateHandle>,
     },
+    RespawnApp {
+        app_id: AppId,
+    },
 }
 
 #[derive(Clone)]
@@ -105,6 +108,10 @@ impl ManagerHandle {
 
     pub fn spawn_actor(&self, process: ProcessId) {
         let _ = self.sender.send(ManagerMsg::SpawnActor { process });
+    }
+
+    pub fn respawn_app(&self, app_id: AppId) {
+        let _ = self.sender.send(ManagerMsg::RespawnApp { app_id });
     }
 
     pub fn route_proposal(&self, proposal: Proposal) {
@@ -200,6 +207,56 @@ pub async fn run_manager(
                     &state_dir,
                 )
                 .await;
+            }
+            ManagerMsg::RespawnApp { app_id } => {
+                tracing::info!("manager: respawning app {}", app_id);
+                let to_respawn: Vec<ProcessId> = executor_senders
+                    .keys()
+                    .filter(|p| {
+                        let app: AppId = AppId::from(*p);
+                        app.namespace == app_id.namespace && app.app == app_id.app
+                    })
+                    .cloned()
+                    .collect();
+
+                // Cancel outstanding promises targeting these processes
+                for pid in &to_respawn {
+                    let n = scheduler.cancel_promises_for(pid.clone()).await;
+                    if n > 0 {
+                        tracing::info!("manager: cancelled {n} promises for {pid} during respawn");
+                    }
+                }
+
+                // Spawn new executors (replaces old senders, old ones drain)
+                for pid in &to_respawn {
+                    spawn_actor(
+                        pid,
+                        &mut executor_senders,
+                        &handler_map,
+                        &mut state_actors,
+                        &store,
+                        &scheduler,
+                        &manager,
+                        &state_dir,
+                    )
+                    .await;
+                }
+
+                // Also re-spawn the entrypoint if it wasn't already running
+                let entrypoint = app_id.with_process("entrypoint".into());
+                if !executor_senders.contains_key(&entrypoint) {
+                    spawn_actor(
+                        &entrypoint,
+                        &mut executor_senders,
+                        &handler_map,
+                        &mut state_actors,
+                        &store,
+                        &scheduler,
+                        &manager,
+                        &state_dir,
+                    )
+                    .await;
+                }
             }
             ManagerMsg::RouteProposal { proposal } => {
                 let process = &proposal.process;

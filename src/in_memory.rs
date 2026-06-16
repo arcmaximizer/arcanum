@@ -85,6 +85,10 @@ impl PackageStore for InMemoryPackageStore {
     fn list_names(&self) -> Vec<String> {
         self.names.keys().cloned().collect()
     }
+
+    fn rescan(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 // ---------------------------------------------------------------------------

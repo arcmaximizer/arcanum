@@ -38,11 +38,14 @@ return {
 
 ```toml
 name = "^my-namespace/my-app"
+version = "1.2.3"
 ```
 
-The `name` field determines how your app is addressed (e.g.
-`^my-namespace/my-app/entrypoint`). The `^` prefix is added automatically if
-missing.
+The `name` field determines how your app is addressed. The `^` prefix is added
+automatically if missing. The `version` field enables hot-reloading — when a
+newer version is dropped into the store directory, Arcanum detects it and
+replaces running processes with the updated code. If `version` is omitted it
+defaults to `0.0.0`.
 
 ### Building the tarball
 
@@ -79,7 +82,21 @@ Arcanum will:
 4. Start the HTTP server on port 6202
 5. Wait for you to press Ctrl+C to shut down
 
-### CLI Options
+### Hot Reloading
+
+Arcanum watches the store directory for changes. When you drop a `.tar.gz`
+package with a higher `version` in `arcanum.toml`, it automatically replaces
+running processes with the new code — no restart required.
+
+```bash
+# Increment version in arcanum.toml, rebuild the tarball, and copy it in:
+cp my-app-v2.tar.gz ~/my-arcanum/store/
+```
+
+In-flight work on the old code is allowed to finish before the old executor
+exits. New messages are routed to the fresh executor.
+
+## CLI Options
 
 ```
 -d, --data-dir <DIR>       Data directory (default: OS data dir + /arcanum)

@@ -40,6 +40,10 @@ pub enum SchedulerMsg {
         returns: Vec<u8>,
         resp: tokio::sync::oneshot::Sender<Result<()>>,
     },
+    CancelPromisesFor {
+        process: ProcessId,
+        resp: tokio::sync::oneshot::Sender<usize>,
+    },
 }
 
 pub async fn run_scheduler(
@@ -161,6 +165,10 @@ pub async fn run_scheduler(
                 }
                 let _ = resp.send(result.map(|_| ()));
             }
+            SchedulerMsg::CancelPromisesFor { process, resp } => {
+                let count = scheduler.cancel_promises_for(&process);
+                let _ = resp.send(count);
+            }
         }
     }
 }
@@ -260,6 +268,17 @@ impl SchedulerHandle {
             .send(SchedulerMsg::StatelessSatisfy {
                 proposal,
                 returns,
+                resp: resp_tx,
+            })
+            .expect("Scheduler task has been killed");
+        resp_rx.await.expect("Scheduler task has been killed")
+    }
+
+    pub async fn cancel_promises_for(&self, process: ProcessId) -> usize {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.sender
+            .send(SchedulerMsg::CancelPromisesFor {
+                process,
                 resp: resp_tx,
             })
             .expect("Scheduler task has been killed");
@@ -365,6 +384,7 @@ pub trait Scheduler {
         returns: Vec<u8>,
     ) -> Result<(NextAction, Vec<Proposal>)>;
     fn get_next_proposals(&self) -> Vec<&Proposal>;
+    fn cancel_promises_for(&mut self, process: &ProcessId) -> usize;
 }
 
 #[derive(Default)]
@@ -390,6 +410,38 @@ impl Scheduler for InMemoryScheduler {
             }
         }
         list
+    }
+
+    fn cancel_promises_for(&mut self, process: &ProcessId) -> usize {
+        let mut cancelled = 0;
+        for (_, schedule) in self.schedule.iter_mut() {
+            let before = schedule.len();
+            schedule.retain(|p| {
+                if let Some(ref promise) = p.promise {
+                    let target = &promise.target;
+                    if target.namespace == process.namespace
+                        && target.app == process.app
+                        && target.proc == process.proc
+                    {
+                        tracing::debug!(
+                            "scheduler: cancelling promise {} targeting {}",
+                            promise,
+                            process
+                        );
+                        cancelled += 1;
+                        return false;
+                    }
+                }
+                true
+            });
+            if schedule.len() < before {
+                tracing::debug!(
+                    "scheduler: removed {} proposals from schedule",
+                    before - schedule.len()
+                );
+            }
+        }
+        cancelled
     }
 
     fn add_proposal(&mut self, proposal: Proposal) -> u64 {
@@ -1067,5 +1119,9 @@ impl Scheduler for PersistentScheduler {
         }
 
         result
+    }
+
+    fn cancel_promises_for(&mut self, process: &ProcessId) -> usize {
+        self.inner.cancel_promises_for(process)
     }
 }
