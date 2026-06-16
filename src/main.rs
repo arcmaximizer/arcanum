@@ -89,13 +89,52 @@ async fn main() {
         }
     }
 
-    // Poll the store directory for package updates
+    // Watch the store directory for package changes
+    let store_dir = config.store_dir();
     let store_poll = store.clone();
     let mgr_poll = manager.clone();
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        use notify::Watcher;
+        use std::time::Duration;
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut watcher =
+            match notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| {
+                match res {
+                    Ok(event) => {
+                        let _ = tx.send(event.kind);
+                    }
+                    Err(e) => {
+                        tracing::warn!("store watcher error: {e}");
+                    }
+                }
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    tracing::error!("failed to create file watcher: {e}");
+                    return;
+                }
+            };
+
+        if let Err(e) = watcher.watch(store_dir.as_ref(), notify::RecursiveMode::NonRecursive) {
+            tracing::error!("failed to watch store directory: {e}");
+            return;
+        }
+
         loop {
-            interval.tick().await;
+            // Wait for first event, then debounce for 500ms
+            if rx.recv().await.is_none() {
+                break;
+            }
+            tracing::debug!("store watcher: change detected");
+            loop {
+                match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+                    Ok(Some(_)) => {}
+                    _ => break,
+                }
+            }
+
+            tracing::info!("store watcher: rescanning for updates");
             let updated = store_poll.rescan().await;
             for name in updated {
                 if let Ok(app_id) = AppId::try_from(name.as_str()) {
