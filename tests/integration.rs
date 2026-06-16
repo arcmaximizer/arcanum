@@ -3,6 +3,7 @@ use std::time::{Duration, Instant};
 
 use arcanum::in_memory::InMemoryPackageStore;
 use arcanum::manager::ManagerHandle;
+use arcanum::mgmt::MgmtHandle;
 use arcanum::proc::http::HttpHandle;
 use arcanum::scheduler::{
     InMemoryScheduler, PersistentScheduler, Proposal, Receipt, RuntimeStatus, SchedulerHandle,
@@ -11,6 +12,8 @@ use arcanum::scheduler::{
 use arcanum::store::{FileSystemPackageStore, StoreHandle};
 use arcanum::types::{AppId, EventId, HandlerId, ProcessId};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 struct TestEnv {
@@ -1363,4 +1366,332 @@ async fn test_blackbox_full_flow() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
     assert_eq!(body["data"], "^sys/http-server/entrypoint");
+}
+
+// --- Management server helpers ---
+
+async fn send_mgmt_frame(stream: &mut TcpStream, value: &serde_json::Value) {
+    let bytes = rmp_serde::to_vec(value).unwrap();
+    let len = bytes.len() as u32;
+    stream.write_all(&len.to_be_bytes()).await.unwrap();
+    stream.write_all(&bytes).await.unwrap();
+}
+
+async fn read_mgmt_frame(stream: &mut TcpStream) -> serde_json::Value {
+    let mut len_buf = [0u8; 4];
+    stream.read_exact(&mut len_buf).await.unwrap();
+    let len = u32::from_be_bytes(len_buf) as usize;
+    let mut buf = vec![0u8; len];
+    stream.read_exact(&mut buf).await.unwrap();
+    rmp_serde::from_slice(&buf).unwrap()
+}
+
+// --- Test 14: Management server call and notify ---
+
+#[tokio::test]
+async fn test_mgmt_call_and_notify() {
+    let env = setup();
+
+    add_package(
+        &env.store,
+        "test",
+        "mgmt-echo",
+        r#"return {
+            entrypoint = function(ctx, msg)
+                return "hello " .. tostring(msg) .. " from " .. ctx.from
+            end,
+            error_handler = function(ctx, msg)
+                error("boom!")
+            end,
+        }"#,
+    )
+    .await;
+
+    let error_process = ProcessId {
+        namespace: "test".into(),
+        app: "mgmt-echo".into(),
+        proc: "error_handler".into(),
+    };
+    env.manager
+        .register_process(
+            error_process.clone(),
+            HandlerId {
+                namespace: "test".into(),
+                app: "mgmt-echo".into(),
+                handler: "error_handler".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let mgmt = MgmtHandle::new(env.scheduler.clone(), 0).await;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", mgmt.port))
+        .await
+        .unwrap();
+
+    // Test 1: call to entrypoint (auto-spawned)
+    send_mgmt_frame(
+        &mut stream,
+        &serde_json::json!({
+            "type": "call",
+            "target": "^test/mgmt-echo",
+            "data": "world",
+        }),
+    )
+    .await;
+
+    let resp = read_mgmt_frame(&mut stream).await;
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["data"], "hello world from ^sys/mgmt/entrypoint");
+
+    // Test 2: call with explicit /entrypoint suffix
+    send_mgmt_frame(
+        &mut stream,
+        &serde_json::json!({
+            "type": "call",
+            "target": "^test/mgmt-echo/entrypoint",
+            "data": "explicit",
+        }),
+    )
+    .await;
+
+    let resp = read_mgmt_frame(&mut stream).await;
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["data"], "hello explicit from ^sys/mgmt/entrypoint");
+
+    // Test 3: call to a registered non-entrypoint process
+    send_mgmt_frame(
+        &mut stream,
+        &serde_json::json!({
+            "type": "call",
+            "target": "^test/mgmt-echo/error_handler",
+            "data": "ignored",
+        }),
+    )
+    .await;
+
+    let resp = read_mgmt_frame(&mut stream).await;
+    assert_eq!(resp["ok"], false);
+    assert!(resp["error"].as_str().unwrap().contains("boom!"));
+
+    // Test 4: notify — should get ack
+    send_mgmt_frame(
+        &mut stream,
+        &serde_json::json!({
+            "type": "notify",
+            "target": "^test/mgmt-echo",
+            "data": "ping",
+        }),
+    )
+    .await;
+
+    let resp = read_mgmt_frame(&mut stream).await;
+    assert_eq!(resp["ok"], true);
+    assert!(resp.get("data").is_none());
+
+    // Test 5: call with no data field
+    send_mgmt_frame(
+        &mut stream,
+        &serde_json::json!({
+            "type": "call",
+            "target": "^test/mgmt-echo",
+        }),
+    )
+    .await;
+
+    let resp = read_mgmt_frame(&mut stream).await;
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["data"], "hello nil from ^sys/mgmt/entrypoint");
+
+    // Test 6: call with JSON object data
+    send_mgmt_frame(
+        &mut stream,
+        &serde_json::json!({
+            "type": "call",
+            "target": "^test/mgmt-echo",
+            "data": {"key": "value", "n": 42},
+        }),
+    )
+    .await;
+
+    let resp = read_mgmt_frame(&mut stream).await;
+    assert_eq!(resp["ok"], true);
+    assert!(resp["data"].as_str().unwrap().starts_with("hello "));
+
+    // Test 7: invalid target (empty namespace)
+    send_mgmt_frame(
+        &mut stream,
+        &serde_json::json!({
+            "type": "call",
+            "target": "/a/b",
+            "data": null,
+        }),
+    )
+    .await;
+
+    let resp = read_mgmt_frame(&mut stream).await;
+    assert_eq!(resp["ok"], false);
+    assert!(resp["error"].as_str().unwrap().contains("invalid target"));
+
+    // Test 8: unknown message type
+    send_mgmt_frame(
+        &mut stream,
+        &serde_json::json!({
+            "type": "bogus",
+            "target": "^test/mgmt-echo",
+        }),
+    )
+    .await;
+
+    let resp = read_mgmt_frame(&mut stream).await;
+    assert_eq!(resp["ok"], false);
+    assert!(
+        resp["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown message type")
+    );
+}
+
+// --- Test 15: Management server notifies deliver ---
+
+#[tokio::test]
+async fn test_mgmt_notify_delivers_to_target() {
+    let env = setup();
+
+    let src_process = ProcessId {
+        namespace: "test".into(),
+        app: "notify-test".into(),
+        proc: "src".into(),
+    };
+    let dest_process = ProcessId {
+        namespace: "test".into(),
+        app: "notify-test".into(),
+        proc: "dest".into(),
+    };
+
+    add_package(
+        &env.store,
+        "test",
+        "notify-test",
+        r#"return {
+            src = function(ctx, msg)
+                notify("^test/notify-test/dest", "fire-and-forget")
+                return "sent"
+            end,
+            dest = function(ctx, msg)
+                kv.set("received", msg)
+                return "ok"
+            end,
+        }"#,
+    )
+    .await;
+
+    env.manager
+        .register_process(
+            src_process.clone(),
+            HandlerId {
+                namespace: "test".into(),
+                app: "notify-test".into(),
+                handler: "src".into(),
+            },
+        )
+        .await
+        .unwrap();
+    env.manager
+        .register_process(
+            dest_process.clone(),
+            HandlerId {
+                namespace: "test".into(),
+                app: "notify-test".into(),
+                handler: "dest".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let mgmt = MgmtHandle::new(env.scheduler.clone(), 0).await;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", mgmt.port))
+        .await
+        .unwrap();
+
+    // Trigger src via mgmt — it will notify dest internally
+    send_mgmt_frame(
+        &mut stream,
+        &serde_json::json!({
+            "type": "call",
+            "target": "^test/notify-test/src",
+            "data": null,
+        }),
+    )
+    .await;
+
+    let resp = read_mgmt_frame(&mut stream).await;
+    assert_eq!(resp["ok"], true);
+    assert_eq!(resp["data"], "sent");
+
+    // Verify dest received the message
+    let state = env.manager.get_state_handle(dest_process.clone()).await;
+    let received = state
+        .get(dest_process, "received".to_string())
+        .await
+        .unwrap_or_default();
+    assert_eq!(received, "fire-and-forget");
+}
+
+// --- Test 16: Management server multiple concurrent connections ---
+
+#[tokio::test]
+async fn test_mgmt_multiple_connections() {
+    let env = setup();
+
+    add_package(
+        &env.store,
+        "test",
+        "multi",
+        r#"return {
+            entrypoint = function(ctx, msg)
+                return msg
+            end,
+        }"#,
+    )
+    .await;
+
+    let mgmt = MgmtHandle::new(env.scheduler.clone(), 0).await;
+
+    let mut stream1 = TcpStream::connect(format!("127.0.0.1:{}", mgmt.port))
+        .await
+        .unwrap();
+    let mut stream2 = TcpStream::connect(format!("127.0.0.1:{}", mgmt.port))
+        .await
+        .unwrap();
+
+    send_mgmt_frame(
+        &mut stream1,
+        &serde_json::json!({
+            "type": "call",
+            "target": "^test/multi",
+            "data": "conn1",
+        }),
+    )
+    .await;
+    send_mgmt_frame(
+        &mut stream2,
+        &serde_json::json!({
+            "type": "call",
+            "target": "^test/multi",
+            "data": "conn2",
+        }),
+    )
+    .await;
+
+    let resp1 = read_mgmt_frame(&mut stream1).await;
+    let resp2 = read_mgmt_frame(&mut stream2).await;
+
+    assert_eq!(resp1["ok"], true);
+    assert_eq!(resp2["ok"], true);
+    let data1 = resp1["data"].as_str().unwrap();
+    let data2 = resp2["data"].as_str().unwrap();
+    assert!(data1.contains("conn1"));
+    assert!(data2.contains("conn2"));
 }

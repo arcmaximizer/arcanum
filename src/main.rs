@@ -1,10 +1,11 @@
-use arcanum::config;
+use arcanum::config::{self, CliArgs};
 use arcanum::manager::ManagerHandle;
 use arcanum::proc::http::HttpHandle;
 use arcanum::proc::http_server::HttpServerHandle;
 use arcanum::scheduler::{PersistentScheduler, SchedulerHandle, run_scheduler};
 use arcanum::store::{FileSystemPackageStore, StoreHandle};
 use arcanum::types::{AppId, ProcessId};
+use clap::Parser;
 use tokio::sync::mpsc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -15,7 +16,14 @@ async fn main() {
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let (config, _cli) = config::load_config();
+    let cli = CliArgs::parse();
+
+    if let Some(config::Command::Shell { host, port, args }) = cli.command {
+        arcanum::shell::run(host, port, args).await;
+        return;
+    }
+
+    let config = config::load_config(&cli);
 
     // Ensure data directories exist
     let data_dir = &config.data.dir;
@@ -62,6 +70,10 @@ async fn main() {
     )
     .await;
     manager.register_stateless(server_process, server.sender());
+
+    // Start management server
+    let mgmt = arcanum::mgmt::MgmtHandle::new(scheduler.clone(), config.mgmt.port).await;
+    tracing::info!("management server listening on port {}", mgmt.port);
 
     // Spawn entrypoint for every package in the store
     for name in store.list_names().await {

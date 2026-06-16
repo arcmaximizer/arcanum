@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
 fn default_port() -> u16 {
@@ -9,6 +9,10 @@ fn default_port() -> u16 {
 
 fn default_bind() -> String {
     "127.0.0.1".into()
+}
+
+fn default_mgmt_port() -> u16 {
+    6203
 }
 
 fn default_data_dir() -> PathBuf {
@@ -41,6 +45,20 @@ impl Default for HttpServerConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct MgmtConfig {
+    #[serde(default = "default_mgmt_port")]
+    pub port: u16,
+}
+
+impl Default for MgmtConfig {
+    fn default() -> Self {
+        Self {
+            port: default_mgmt_port(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct DataConfig {
     #[serde(default = "default_data_dir")]
     pub dir: PathBuf,
@@ -64,6 +82,8 @@ impl Default for DataConfig {
 pub struct ArcanumConfig {
     #[serde(default)]
     pub http_server: HttpServerConfig,
+    #[serde(default)]
+    pub mgmt: MgmtConfig,
     #[serde(default)]
     pub data: DataConfig,
 }
@@ -89,9 +109,28 @@ impl ArcanumConfig {
     }
 }
 
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Connect to a running Arcanum node
+    Shell {
+        /// Management server host
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Management server port
+        #[arg(long, default_value_t = 6203)]
+        port: u16,
+        /// Run a single command (call/notify) and exit
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+}
+
 #[derive(Parser, Debug)]
 #[command(name = "arcanum", version, about = "Arcanum app runtime")]
 pub struct CliArgs {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
     #[arg(short = 'c', long, help = "Path to config file")]
     pub config: Option<PathBuf>,
 
@@ -103,6 +142,9 @@ pub struct CliArgs {
 
     #[arg(long, help = "HTTP server bind address")]
     pub bind: Option<String>,
+
+    #[arg(long, help = "Management server port (for arcanum shell)")]
+    pub mgmt_port: Option<u16>,
 
     #[arg(long, help = "Directory of .tar.gz packages to auto-load")]
     pub packages_dir: Option<PathBuf>,
@@ -129,10 +171,8 @@ fn find_config(cli: &CliArgs) -> PathBuf {
     candidates[0].clone()
 }
 
-pub fn load_config() -> (ArcanumConfig, CliArgs) {
-    let cli = CliArgs::parse();
-
-    let config_path = find_config(&cli);
+pub fn load_config(cli: &CliArgs) -> ArcanumConfig {
+    let config_path = find_config(cli);
     let mut config: ArcanumConfig = if config_path.exists() {
         let contents = std::fs::read_to_string(&config_path)
             .unwrap_or_else(|e| panic!("failed to read config {}: {}", config_path.display(), e));
@@ -151,6 +191,9 @@ pub fn load_config() -> (ArcanumConfig, CliArgs) {
     if let Some(bind) = &cli.bind {
         config.http_server.bind = bind.clone();
     }
+    if let Some(port) = cli.mgmt_port {
+        config.mgmt.port = port;
+    }
     if let Some(dir) = &cli.packages_dir {
         config.data.packages_dir = Some(dir.clone());
     }
@@ -158,5 +201,5 @@ pub fn load_config() -> (ArcanumConfig, CliArgs) {
         config.data.auto_load_packages = true;
     }
 
-    (config, cli)
+    config
 }
