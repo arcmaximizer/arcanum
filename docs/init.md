@@ -92,8 +92,39 @@ Arcanum will:
 
 ## Interacting with the Node
 
-Currently there is **no interactive shell** - `arcanum` runs as a daemon and
-exits on Ctrl+C.
+### Interactive Shell
+
+Arcanum ships with an interactive shell. Connect to a running node:
+
+```bash
+arcanum shell
+```
+
+Or run a single command:
+
+```bash
+arcanum shell call ^my-namespace/my-app "hello world"
+arcanum shell notify ^my-namespace/my-app "fire and forget"
+```
+
+The shell auto-parses data as JSON when possible:
+
+```
+> call ^test/echo 42          # sends the number 42
+> call ^test/echo true        # sends boolean true
+> call ^test/echo null        # sends Lua nil
+> call ^test/echo [1,2,3]     # sends a Lua table (array)
+> call ^test/echo '"null"'    # sends the string "null"
+> call ^test/echo "a string"  # sends the string "a string"
+```
+
+To send a literal string that looks like JSON (`null`, `true`, `42`, etc.),
+wrap it in quotes: `'"null"'`.
+
+The management server listens on port 6203 by default. Override it with
+`--mgmt-port <PORT>` or set `[mgmt] port = ...` in the config file.
+
+### HTTP Server
 
 The HTTP server is running and can route requests to your apps, but routes must
 be registered **from within a running process** by sending a message to
