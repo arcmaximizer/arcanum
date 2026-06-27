@@ -127,12 +127,9 @@ async fn main() {
                 break;
             }
             tracing::debug!("store watcher: change detected");
-            loop {
-                match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
-                    Ok(Some(_)) => {}
-                    _ => break,
-                }
-            }
+            while let Ok(Some(_)) =
+                tokio::time::timeout(Duration::from_millis(500), rx.recv()).await
+            {}
 
             tracing::info!("store watcher: rescanning for updates");
             let updated = store_poll.rescan().await;

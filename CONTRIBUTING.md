@@ -10,8 +10,15 @@ the repo such as `git checkout -b feat/add-hamburgers`, then make changes to
 that branch. Once you're done, submit the contribution as a PR and await
 maintainer approval.
 
-Commits should be named using Conventional Commits. Linting, formatting and so
-on will be enforced by a PR bot.
+Commits should be named using Conventional Commits. Before pushing, run:
+
+```bash
+cargo fmt
+cargo clippy -- -D warnings
+cargo test
+```
+
+Linting, formatting, and tests are also enforced by CI.
 
 ## Vibe coding
 

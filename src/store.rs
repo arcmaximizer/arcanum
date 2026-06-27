@@ -243,14 +243,14 @@ impl FileSystemPackageStore {
                 }
                 // New format: {"key": [...], "version": "1.2.3"}
                 serde_json::Value::Object(obj) => {
-                    if let Some(serde_json::Value::Array(arr)) = obj.get("key") {
-                        if arr.len() == 32 {
-                            let mut key = [0u8; 32];
-                            for (i, v) in arr.iter().enumerate() {
-                                key[i] = v.as_u64().unwrap_or(0) as u8;
-                            }
-                            self.names.insert(name.clone(), key);
+                    if let Some(serde_json::Value::Array(arr)) = obj.get("key")
+                        && arr.len() == 32
+                    {
+                        let mut key = [0u8; 32];
+                        for (i, v) in arr.iter().enumerate() {
+                            key[i] = v.as_u64().unwrap_or(0) as u8;
                         }
+                        self.names.insert(name.clone(), key);
                     }
                     if let Some(serde_json::Value::String(v)) = obj.get("version") {
                         self.versions.insert(name, v.clone());
@@ -330,18 +330,18 @@ impl FileSystemPackageStore {
             }
 
             // Auto-register name from arcanum.toml
-            if let Some(toml_bytes) = self.cache.get(&(key, "arcanum.toml".into())) {
-                if let Some(name) = package_name_from_toml(toml_bytes) {
-                    let version = extract_version(toml_bytes);
-                    let current = self
-                        .versions
-                        .get(&name)
-                        .cloned()
-                        .unwrap_or_else(|| "0.0.0".into());
-                    if version_is_newer(&current, &version) || !self.names.contains_key(&name) {
-                        self.names.insert(name.clone(), key);
-                        self.versions.insert(name.clone(), version);
-                    }
+            if let Some(toml_bytes) = self.cache.get(&(key, "arcanum.toml".into()))
+                && let Some(name) = package_name_from_toml(toml_bytes)
+            {
+                let version = extract_version(toml_bytes);
+                let current = self
+                    .versions
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| "0.0.0".into());
+                if version_is_newer(&current, &version) || !self.names.contains_key(&name) {
+                    self.names.insert(name.clone(), key);
+                    self.versions.insert(name.clone(), version);
                 }
             }
         }
@@ -407,13 +407,13 @@ impl PackageStore for FileSystemPackageStore {
         }
 
         // Auto-register name from arcanum.toml
-        if let Some(toml_bytes) = self.cache.get(&(key, "arcanum.toml".into())) {
-            if let Some(name) = package_name_from_toml(toml_bytes) {
-                let version = extract_version(toml_bytes);
-                self.set_name(&name, key);
-                self.versions.insert(name, version);
-                let _ = self.save_names();
-            }
+        if let Some(toml_bytes) = self.cache.get(&(key, "arcanum.toml".into()))
+            && let Some(name) = package_name_from_toml(toml_bytes)
+        {
+            let version = extract_version(toml_bytes);
+            self.set_name(&name, key);
+            self.versions.insert(name, version);
+            let _ = self.save_names();
         }
 
         Ok(key)
@@ -481,30 +481,25 @@ impl PackageStore for FileSystemPackageStore {
             }
 
             // Check arcanum.toml for name and version
-            if let Some(toml_bytes) = self.cache.get(&(key, "arcanum.toml".into())) {
-                if let Some(name) = package_name_from_toml(toml_bytes) {
-                    let version = extract_version(toml_bytes);
-                    let current = self
-                        .versions
-                        .get(&name)
-                        .cloned()
-                        .unwrap_or_else(|| "0.0.0".into());
-                    if version_is_newer(&current, &version) {
-                        tracing::info!(
-                            "store: updating {} from v{} to v{}",
-                            name,
-                            current,
-                            version
-                        );
-                        self.names.insert(name.clone(), key);
-                        self.versions.insert(name.clone(), version);
-                        updated.push(name);
-                    } else if !self.names.contains_key(&name) {
-                        tracing::info!("store: registering new package {}", name);
-                        self.names.insert(name.clone(), key);
-                        self.versions.insert(name.clone(), version);
-                        updated.push(name);
-                    }
+            if let Some(toml_bytes) = self.cache.get(&(key, "arcanum.toml".into()))
+                && let Some(name) = package_name_from_toml(toml_bytes)
+            {
+                let version = extract_version(toml_bytes);
+                let current = self
+                    .versions
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| "0.0.0".into());
+                if version_is_newer(&current, &version) {
+                    tracing::info!("store: updating {} from v{} to v{}", name, current, version);
+                    self.names.insert(name.clone(), key);
+                    self.versions.insert(name.clone(), version);
+                    updated.push(name);
+                } else if !self.names.contains_key(&name) {
+                    tracing::info!("store: registering new package {}", name);
+                    self.names.insert(name.clone(), key);
+                    self.versions.insert(name.clone(), version);
+                    updated.push(name);
                 }
             }
         }

@@ -64,15 +64,10 @@ async fn handle_connection(
     mgmt_process: ProcessId,
 ) {
     let mut buf = Vec::new();
-    loop {
-        match read_frame(&mut stream, &mut buf).await {
-            Some(data) => {
-                let response = handle_message(&data, &scheduler, &mgmt_process).await;
-                if write_frame(&mut stream, &response).await.is_err() {
-                    break;
-                }
-            }
-            None => break,
+    while let Some(data) = read_frame(&mut stream, &mut buf).await {
+        let response = handle_message(&data, &scheduler, &mgmt_process).await;
+        if write_frame(&mut stream, &response).await.is_err() {
+            break;
         }
     }
 }

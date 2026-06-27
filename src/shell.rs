@@ -185,12 +185,12 @@ fn extract_timeout(tokens: Vec<String>, default_secs: u64) -> (u64, Vec<String>)
                 i += 1;
                 continue;
             }
-        } else if let Some(s) = tokens[i].strip_prefix("--timeout=") {
-            if let Ok(ms) = s.parse::<u64>() {
-                timeout = ms;
-                i += 1;
-                continue;
-            }
+        } else if let Some(s) = tokens[i].strip_prefix("--timeout=")
+            && let Ok(ms) = s.parse::<u64>()
+        {
+            timeout = ms;
+            i += 1;
+            continue;
         }
         remaining.push(tokens[i].clone());
         i += 1;
