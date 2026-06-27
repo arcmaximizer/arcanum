@@ -9,7 +9,7 @@ use arcanum::scheduler::{
     InMemoryScheduler, PersistentScheduler, Proposal, Receipt, RuntimeStatus, SchedulerHandle,
     Syscall, run_scheduler,
 };
-use arcanum::store::{FileSystemPackageStore, StoreHandle};
+use arcanum::store::{FileSystemPackageStore, PackageStore, StoreHandle};
 use arcanum::types::{AppId, EventId, HandlerId, ProcessId};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1736,4 +1736,178 @@ async fn test_mgmt_multiple_connections() {
     let data2 = resp2["data"].as_str().unwrap();
     assert!(data1.contains("conn1"));
     assert!(data2.contains("conn2"));
+}
+
+// --- Test 18: Rescan picks up new package version ---
+
+#[test]
+fn test_rescan_updates_package() {
+    let tmpdir = TempDir::new().unwrap();
+    let store_dir = tmpdir.path().join("store");
+    std::fs::create_dir_all(&store_dir).unwrap();
+
+    // V1: version 1.0.0
+    let v1_code = "return { entrypoint = function(ctx, msg) return 'v1' end }";
+    let v1_toml = "name = \"test/reload\"\nversion = \"1.0.0\"";
+    let v1_tarball = make_tar_gz_with_files(&[
+        ("main.lua", v1_code.as_bytes()),
+        ("arcanum.toml", v1_toml.as_bytes()),
+    ]);
+    std::fs::write(store_dir.join("pkg-v1.tar.gz"), &v1_tarball).unwrap();
+
+    // Open store — it reads v1
+    let store = FileSystemPackageStore::open(&store_dir).unwrap();
+    assert!(store.list_names().contains(&"^test/reload".into()));
+    let v1_key = store.resolve_name("^test/reload").unwrap();
+    let v1_asset = store.get_asset(&v1_key, "main.lua").unwrap();
+    assert!(String::from_utf8_lossy(&v1_asset).contains("'v1'"));
+
+    // V2: version 2.0.0 — write to filesystem, don't re-open store
+    let v2_code = "return { entrypoint = function(ctx, msg) return 'v2' end }";
+    let v2_toml = "name = \"test/reload\"\nversion = \"2.0.0\"";
+    let v2_tarball = make_tar_gz_with_files(&[
+        ("main.lua", v2_code.as_bytes()),
+        ("arcanum.toml", v2_toml.as_bytes()),
+    ]);
+    std::fs::write(store_dir.join("pkg-v2.tar.gz"), &v2_tarball).unwrap();
+
+    // Rescan should detect the new version
+    let mut store = store;
+    let updated = store.rescan();
+    assert!(
+        updated.contains(&"^test/reload".into()),
+        "rescan should detect update"
+    );
+
+    // Verify name now resolves to the new key
+    let v2_key = store.resolve_name("^test/reload").unwrap();
+    assert_ne!(v1_key, v2_key, "key should change for new version");
+
+    let v2_asset = store.get_asset(&v2_key, "main.lua").unwrap();
+    assert!(
+        String::from_utf8_lossy(&v2_asset).contains("'v2'"),
+        "asset should contain v2 code"
+    );
+
+    // Old key still resolves for old package
+    let old_asset = store.get_asset(&v1_key, "main.lua").unwrap();
+    assert!(String::from_utf8_lossy(&old_asset).contains("'v1'"));
+}
+
+// --- Test 19: Rescan ignores same or lower version ---
+
+#[test]
+fn test_rescan_ignores_lower_version() {
+    let tmpdir = TempDir::new().unwrap();
+    let store_dir = tmpdir.path().join("store");
+    std::fs::create_dir_all(&store_dir).unwrap();
+
+    let v1_code = "return { entrypoint = function() return 'v1' end }";
+    let v1_toml = "name = \"test/stable\"\nversion = \"5.0.0\"";
+    let v1_tarball = make_tar_gz_with_files(&[
+        ("main.lua", v1_code.as_bytes()),
+        ("arcanum.toml", v1_toml.as_bytes()),
+    ]);
+    std::fs::write(store_dir.join("v1.tar.gz"), &v1_tarball).unwrap();
+
+    let mut store = FileSystemPackageStore::open(&store_dir).unwrap();
+    let v1_key = store.resolve_name("^test/stable").unwrap();
+
+    // V2: version 4.0.0 (lower) — should be ignored
+    let v2_code = "return { entrypoint = function() return 'v2' end }";
+    let v2_toml = "name = \"test/stable\"\nversion = \"4.0.0\"";
+    let v2_tarball = make_tar_gz_with_files(&[
+        ("main.lua", v2_code.as_bytes()),
+        ("arcanum.toml", v2_toml.as_bytes()),
+    ]);
+    std::fs::write(store_dir.join("v2.tar.gz"), &v2_tarball).unwrap();
+
+    let updated = store.rescan();
+    assert!(!updated.contains(&"^test/stable".into()));
+
+    let still_key = store.resolve_name("^test/stable").unwrap();
+    assert_eq!(still_key, v1_key, "key should not change for lower version");
+}
+
+// --- Test 20: Respawn swaps executor to new code ---
+
+#[tokio::test]
+async fn test_respawn_app_swaps_executor() {
+    let env = setup();
+
+    let process = ProcessId {
+        namespace: "test".into(),
+        app: "swap-app".into(),
+        proc: "entrypoint".into(),
+    };
+
+    // Add v1 package
+    let v1_code = "return { entrypoint = function(ctx, msg) return 'v1:' .. tostring(msg) end }";
+    add_package(&env.store, "test", "swap-app", v1_code).await;
+
+    // Spawn and verify v1
+    env.manager.spawn_actor(process.clone());
+    // "hello" proposal arrives before the init notification because spawn_actor
+    // sends the init message asynchronously through the scheduler
+    env.scheduler
+        .add_proposal(Proposal {
+            process: process.clone(),
+            event: None,
+            input: mp("hello"),
+            promise: None,
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
+        })
+        .await;
+
+    let event0 = EventId {
+        namespace: "test".into(),
+        app: "swap-app".into(),
+        proc: "entrypoint".into(),
+        seq: 0,
+    };
+
+    let chunks = wait_for_chunks(&env.scheduler, event0, 1, Duration::from_secs(2)).await;
+    assert_eq!(chunks[0].returns, mp_data("v1:hello"));
+
+    // "Update" the package: add new code, point name to new key
+    let v2_code = "return { entrypoint = function(ctx, msg) return 'v2:' .. tostring(msg) end }";
+    let tarball = make_tar_gz(v2_code);
+    let v2_key = env.store.add_package(tarball.into()).await.unwrap();
+    env.store.set_name("^test/swap-app".into(), v2_key);
+
+    // Respawn the app — cancels in-flight, swaps executor
+    let app_id = AppId::try_from("^test/swap-app").unwrap();
+    env.manager.respawn_app(app_id);
+
+    // Wait for respawn to complete (asynchronous, fire-and-forget)
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // New proposal goes to new executor with v2 code
+    env.scheduler
+        .add_proposal(Proposal {
+            process: process.clone(),
+            event: None,
+            input: mp("world"),
+            promise: None,
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
+        })
+        .await;
+
+    // After respawn: seq 2 = init notification, seq 3 = "world"
+    let event_world = EventId {
+        namespace: "test".into(),
+        app: "swap-app".into(),
+        proc: "entrypoint".into(),
+        seq: 3,
+    };
+    let chunks2 = wait_for_chunks(&env.scheduler, event_world, 1, Duration::from_secs(2)).await;
+    assert_eq!(chunks2[0].returns, mp_data("v2:world"));
 }

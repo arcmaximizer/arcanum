@@ -581,3 +581,52 @@ pub(crate) fn detect_tar(data: &Bytes) -> Option<&'static str> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_version_is_newer() {
+        assert!(version_is_newer("0.0.0", "0.0.1"));
+        assert!(version_is_newer("0.0.0", "1.0.0"));
+        assert!(version_is_newer("1.0.0", "2.0.0"));
+        assert!(version_is_newer("1.2.3", "1.2.4"));
+        assert!(version_is_newer("1.2.3", "1.3.0"));
+        assert!(!version_is_newer("1.0.0", "1.0.0"));
+        assert!(!version_is_newer("1.0.0", "0.9.9"));
+        assert!(!version_is_newer("2.0.0", "1.99.99"));
+        // Missing version falls back to 0.0.0
+        assert!(version_is_newer("", "0.0.1"));
+        // Garbage version strings default to 0
+        assert!(version_is_newer("bad", "1.0.0"));
+        assert!(!version_is_newer("1.0.0", "bad"));
+    }
+
+    #[test]
+    fn test_extract_version() {
+        assert_eq!(
+            extract_version(b"name = \"test\"\nversion = \"2.1.3\""),
+            "2.1.3"
+        );
+        // Missing version defaults to 0.0.0
+        assert_eq!(extract_version(b"name = \"test\""), "0.0.0");
+        // [package] section
+        assert_eq!(
+            extract_version(b"[package]\nname = \"test\"\nversion = \"3.0.0\""),
+            "3.0.0"
+        );
+    }
+
+    #[test]
+    fn test_package_name_from_toml() {
+        let found = package_name_from_toml(b"name = \"my-ns/my-app\"");
+        assert_eq!(found, Some("^my-ns/my-app".into()));
+
+        let found2 = package_name_from_toml(b"name = \"^already/has/caret\"");
+        assert_eq!(found2, Some("^already/has/caret".into()));
+
+        let none = package_name_from_toml(b"version = \"1.0\"");
+        assert_eq!(none, None);
+    }
+}
