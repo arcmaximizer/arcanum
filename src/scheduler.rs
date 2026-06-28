@@ -911,10 +911,16 @@ impl PersistentScheduler {
         }
     }
 
-    fn remove_proposal(&self, process: &ProcessId, position: i64) {
+    fn pop_proposal(&self, process: &ProcessId) {
+        // Delete the front proposal (position 0)
         let _ = self.conn.execute(
-            "DELETE FROM proposals WHERE process_namespace = ?1 AND process_app = ?2 AND process_proc = ?3 AND position >= ?4",
-            rusqlite::params![process.namespace, process.app, process.proc, position],
+            "DELETE FROM proposals WHERE process_namespace = ?1 AND process_app = ?2 AND process_proc = ?3 AND position = 0",
+            rusqlite::params![process.namespace, process.app, process.proc],
+        );
+        // Shift remaining positions down by 1
+        let _ = self.conn.execute(
+            "UPDATE proposals SET position = position - 1 WHERE process_namespace = ?1 AND process_app = ?2 AND process_proc = ?3",
+            rusqlite::params![process.namespace, process.app, process.proc],
         );
     }
 
@@ -1057,16 +1063,7 @@ impl Scheduler for PersistentScheduler {
             }
 
             if completes_proposal {
-                // Remove completed proposal from persisted schedule
-                let schedule = self.inner.schedule.get(process);
-                let _removed_count = schedule.map(|s| s.len() as i64).unwrap_or(0);
-                self.remove_proposal(process, 0);
-                // Re-save remaining proposals
-                if let Some(sched) = self.inner.schedule.get(process) {
-                    for (i, p) in sched.iter().enumerate() {
-                        self.save_proposal(process, i as u64, p);
-                    }
-                }
+                self.pop_proposal(process);
             }
 
             for p in new_proposals {
@@ -1103,12 +1100,7 @@ impl Scheduler for PersistentScheduler {
         let result = self.inner.stateless_satisfy(proposal, returns);
 
         if let Ok((_, ref new_proposals)) = result {
-            if let Some(sched) = self.inner.schedule.get(process) {
-                self.remove_proposal(process, 0);
-                for (i, p) in sched.iter().enumerate() {
-                    self.save_proposal(process, i as u64, p);
-                }
-            }
+            self.pop_proposal(process);
             for p in new_proposals {
                 let sched = self.inner.schedule.get(&p.process);
                 let pos = sched

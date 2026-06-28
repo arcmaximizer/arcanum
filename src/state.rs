@@ -109,17 +109,7 @@ pub(crate) fn sqlite_value_to_json(value: rusqlite::types::Value) -> serde_json:
     }
 }
 
-pub(crate) fn msgpack_params_to_sqlite(params: &[u8]) -> Vec<rusqlite::types::Value> {
-    if params.is_empty() {
-        return Vec::new();
-    }
-    match rmp_serde::from_slice::<Vec<serde_json::Value>>(params) {
-        Ok(json_params) => json_params.into_iter().map(json_to_sqlite_value).collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
-pub(crate) fn json_to_sqlite_value(value: serde_json::Value) -> rusqlite::types::Value {
+fn json_to_sqlite_value(value: serde_json::Value) -> rusqlite::types::Value {
     match value {
         serde_json::Value::Null => rusqlite::types::Value::Null,
         serde_json::Value::Bool(b) => rusqlite::types::Value::Integer(b as i64),
@@ -140,6 +130,17 @@ pub(crate) fn json_to_sqlite_value(value: serde_json::Value) -> rusqlite::types:
     }
 }
 
+pub(crate) fn msgpack_params_to_sqlite(params: &[u8]) -> Vec<rusqlite::types::Value> {
+    if params.is_empty() {
+        return Vec::new();
+    }
+    let json_params: Vec<serde_json::Value> = match rmp_serde::from_slice(params) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    json_params.into_iter().map(json_to_sqlite_value).collect()
+}
+
 fn db_path_for_process(state_dir: &Path, process: &ProcessId) -> PathBuf {
     state_dir
         .join(&process.namespace)
@@ -147,8 +148,6 @@ fn db_path_for_process(state_dir: &Path, process: &ProcessId) -> PathBuf {
         .join(format!("{}.db", process.proc))
 }
 
-/// Spawn a per-process state actor with its own KV store and SQLite database.
-/// The SQLite database is persisted at `{state_dir}/{namespace}/{app}/{proc}.db`.
 pub fn spawn_per_process_state(process: &ProcessId, state_dir: &Path) -> StateHandle {
     let db_path = db_path_for_process(state_dir, process);
     if let Some(parent) = db_path.parent() {
@@ -184,13 +183,22 @@ async fn run_per_process_state(mut rx: mpsc::UnboundedReceiver<StateMsg>, db_pat
                 let _ = resp.send(());
             }
             StateMsg::Get { key, resp, .. } => {
-                let value = conn
-                    .query_row(
-                        "SELECT value FROM kv WHERE key = ?1",
-                        rusqlite::params![&key],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .ok();
+                // Read from in-memory HashMap first, fall back to SQLite on miss
+                let value = if let Some(v) = kv.get(&key).cloned() {
+                    Some(v)
+                } else {
+                    let v = conn
+                        .query_row(
+                            "SELECT value FROM kv WHERE key = ?1",
+                            rusqlite::params![&key],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .ok();
+                    if let Some(ref val) = v {
+                        kv.insert(key, val.clone());
+                    }
+                    v
+                };
                 let _ = resp.send(value);
             }
             StateMsg::SqlExec {
