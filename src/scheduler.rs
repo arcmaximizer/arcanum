@@ -911,17 +911,23 @@ impl PersistentScheduler {
         }
     }
 
-    fn pop_proposal(&self, process: &ProcessId) {
-        // Delete the front proposal (position 0)
-        let _ = self.conn.execute(
-            "DELETE FROM proposals WHERE process_namespace = ?1 AND process_app = ?2 AND process_proc = ?3 AND position = 0",
-            rusqlite::params![process.namespace, process.app, process.proc],
-        );
-        // Shift remaining positions down by 1
-        let _ = self.conn.execute(
-            "UPDATE proposals SET position = position - 1 WHERE process_namespace = ?1 AND process_app = ?2 AND process_proc = ?3",
-            rusqlite::params![process.namespace, process.app, process.proc],
-        );
+    fn pop_proposal(&mut self, process: &ProcessId) {
+        if let Ok(tx) =
+            rusqlite::Transaction::new(&mut self.conn, rusqlite::TransactionBehavior::Immediate)
+        {
+            let r1 = tx.execute(
+                "DELETE FROM proposals WHERE process_namespace = ?1 AND process_app = ?2 AND process_proc = ?3 AND position = 0",
+                rusqlite::params![process.namespace, process.app, process.proc],
+            );
+            let r2 = tx.execute(
+                "UPDATE proposals SET position = position - 1 WHERE process_namespace = ?1 AND process_app = ?2 AND process_proc = ?3",
+                rusqlite::params![process.namespace, process.app, process.proc],
+            );
+            if r1.is_ok() && r2.is_ok() {
+                let _ = tx.commit();
+            }
+            // tx auto-rolls-back on drop if not committed
+        }
     }
 
     fn save_receipt(&self, event: &EventId, chunk_seq: u64, receipt: &Receipt) {
