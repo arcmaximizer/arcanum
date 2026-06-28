@@ -127,8 +127,8 @@ rawset(_G, "sql", sql)
 rawset(_G, "call", call)
 rawset(_G, "notify", notify)
 rawset(_G, "register", register)
+rawset(_G, "raw_syscall", syscall)
 rawset(_G, "coroutine", nil)
-rawset(_G, "syscall", nil)
 
 return function(main_fn)
     return main_fn

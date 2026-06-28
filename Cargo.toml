@@ -33,3 +33,4 @@ dirs = "6"
 toml = "0.8"
 rustyline = "18.0.0"
 notify = { version = "8.2.0", features = ["macos_kqueue"] }
+url = "2"

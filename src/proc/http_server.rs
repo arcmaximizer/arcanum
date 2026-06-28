@@ -5,11 +5,10 @@ use axum::{
     Router,
     body::Bytes,
     extract::State,
-    http::HeaderMap,
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::any,
 };
-use reqwest::StatusCode;
 use tokio::sync::{RwLock, mpsc};
 
 use crate::{
@@ -18,19 +17,90 @@ use crate::{
     types::ProcessId,
 };
 
-fn body_to_msgpack(body: &[u8]) -> Vec<u8> {
-    let body_str = String::from_utf8_lossy(body);
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body_str) {
-        rmp_serde::to_vec(&json).unwrap_or_else(|_| body.to_vec())
-    } else {
-        rmp_serde::to_vec(&serde_json::Value::String(body_str.into()))
-            .unwrap_or_else(|_| body.to_vec())
-    }
+fn encode_response(value: &serde_json::Value) -> Vec<u8> {
+    let wrapped = serde_json::json!({"data": value});
+    rmp_serde::to_vec(&wrapped).unwrap_or_default()
 }
 
-fn encode_response(value: &serde_json::Value) -> Vec<u8> {
-    let wrapped = serde_json::json!({ "data": value });
-    rmp_serde::to_vec(&wrapped).unwrap_or_default()
+fn build_request_input(method: &Method, uri: &Uri, headers: &HeaderMap, body: &Bytes) -> Vec<u8> {
+    let query: serde_json::Map<String, serde_json::Value> = uri
+        .query()
+        .map(|q| {
+            url::form_urlencoded::parse(q.as_bytes())
+                .into_owned()
+                .map(|(k, v)| (k, serde_json::Value::String(v)))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let header_map: serde_json::Map<String, serde_json::Value> = headers
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str().ok().map(|val| {
+                (
+                    k.as_str().to_string(),
+                    serde_json::Value::String(val.to_string()),
+                )
+            })
+        })
+        .collect();
+
+    let body_str = String::from_utf8_lossy(body).into_owned();
+
+    rmp_serde::to_vec(&serde_json::json!({
+        "method": method.as_str(),
+        "path": uri.path(),
+        "query": query,
+        "headers": header_map,
+        "body": body_str,
+    }))
+    .unwrap_or_default()
+}
+
+fn build_response(returns: &[u8]) -> Response {
+    if returns.is_empty() {
+        return (StatusCode::NO_CONTENT, "").into_response();
+    }
+
+    let json = match rmp_serde::from_slice::<serde_json::Value>(returns) {
+        Ok(v) => v,
+        Err(_) => return (StatusCode::OK, returns.to_vec()).into_response(),
+    };
+
+    let data = json.get("data").cloned().unwrap_or(serde_json::Value::Null);
+
+    match data {
+        // Table with "body" key → full control response
+        serde_json::Value::Object(ref obj) if obj.contains_key("body") => {
+            let status = obj
+                .get("status")
+                .and_then(|s| s.as_u64())
+                .and_then(|s| StatusCode::from_u16(s as u16).ok())
+                .unwrap_or(StatusCode::OK);
+
+            let body_val = obj.get("body").cloned().unwrap_or(serde_json::Value::Null);
+
+            let mut response = axum::Json(serde_json::json!({"data": body_val})).into_response();
+            *response.status_mut() = status;
+
+            if let Some(headers_obj) = obj.get("headers").and_then(|h| h.as_object()) {
+                for (k, v) in headers_obj {
+                    if let Some(val) = v.as_str()
+                        && let (Ok(name), Ok(value)) = (
+                            HeaderName::from_bytes(k.as_bytes()),
+                            HeaderValue::from_str(val),
+                        )
+                    {
+                        response.headers_mut().insert(name, value);
+                    }
+                }
+            }
+
+            response
+        }
+        // Primitive or table without "body" → old behaviour (200 OK)
+        _ => (StatusCode::OK, axum::Json(json)).into_response(),
+    }
 }
 
 #[derive(Clone)]
@@ -118,7 +188,7 @@ async fn handle_process_messages(
                 match ProcessId::try_from(app_str) {
                     Ok(pid) => {
                         tracing::debug!(
-                            "http_server: registerd route {} for process {}",
+                            "http_server: registered route {} for process {}",
                             host,
                             pid
                         );
@@ -169,6 +239,8 @@ async fn handle_process_messages(
 
 async fn handle_request(
     State(state): State<AppState>,
+    method: Method,
+    uri: Uri,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -187,9 +259,10 @@ async fn handle_request(
     };
 
     tracing::debug!(
-        "http_server: handling request to host {}, state routes {:?}",
+        "http_server: handling request {} {} for host {}",
+        method,
+        uri.path(),
         host,
-        state.routes.read().await
     );
 
     let process = match process {
@@ -197,7 +270,7 @@ async fn handle_request(
         None => return (StatusCode::NOT_FOUND, "no route for host").into_response(),
     };
 
-    let input = body_to_msgpack(&body);
+    let input = build_request_input(&method, &uri, &headers, &body);
 
     let proposal = Proposal {
         process: process.clone(),
@@ -225,14 +298,7 @@ async fn handle_request(
         {
             match last.status {
                 RuntimeStatus::End => {
-                    let returns = &last.returns;
-                    if returns.is_empty() {
-                        return (StatusCode::NO_CONTENT, "").into_response();
-                    }
-                    if let Ok(json) = rmp_serde::from_slice::<serde_json::Value>(returns) {
-                        return (StatusCode::OK, axum::Json(json)).into_response();
-                    }
-                    return (StatusCode::OK, returns.clone()).into_response();
+                    return build_response(&last.returns);
                 }
                 RuntimeStatus::Error => {
                     let error_msg = String::from_utf8_lossy(&last.returns).to_string();

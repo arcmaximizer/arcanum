@@ -362,6 +362,68 @@ async fn test_kv_and_sql() {
     assert_eq!(chunks[5].returns, expected);
 }
 
+// --- Test 2b: Unknown syscall produces error instead of panic ---
+
+#[tokio::test]
+async fn test_unknown_syscall_is_error() {
+    let env = setup();
+
+    let process = ProcessId {
+        namespace: "test".into(),
+        app: "test".into(),
+        proc: "badcall".into(),
+    };
+    let event = EventId {
+        namespace: "test".into(),
+        app: "test".into(),
+        proc: "badcall".into(),
+        seq: 0,
+    };
+
+    add_package(
+        &env.store,
+        "test",
+        "test",
+        r#"return { badcall = function(ctx, msg) raw_syscall("bogus") end }"#,
+    )
+    .await;
+
+    env.manager
+        .register_process(
+            process.clone(),
+            HandlerId {
+                namespace: "test".into(),
+                app: "test".into(),
+                handler: "badcall".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    env.scheduler
+        .add_proposal(Proposal {
+            process: process.clone(),
+            event: None,
+            input: mp("start"),
+            promise: None,
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
+        })
+        .await;
+
+    // Should get an error receipt, not a panic
+    let chunks = wait_for_chunks(&env.scheduler, event, 1, Duration::from_secs(2)).await;
+    assert_eq!(chunks.len(), 1);
+    assert_eq!(chunks[0].status, RuntimeStatus::Error);
+    assert!(String::from_utf8_lossy(&chunks[0].returns).contains("Unknown syscall type"));
+    assert_eq!(chunks[0].syscalls, vec![]);
+
+    assert!(env.scheduler.get_next(process.clone()).await.is_none());
+}
+
 // --- Test 3: Lua error ---
 
 #[tokio::test]
@@ -1088,7 +1150,7 @@ async fn test_http_server_routes_by_host_header() {
         "echo",
         r#"return {
             entrypoint = function(ctx, msg)
-                return "echo: " .. msg
+                return "echo: " .. msg.body
             end,
         }"#,
     )
@@ -1134,6 +1196,164 @@ async fn test_http_server_routes_by_host_header() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
     assert_eq!(body["data"], "echo: hello");
+}
+
+// --- Test 11a: HTTP server full response (status, headers, body) ---
+
+#[tokio::test]
+async fn test_http_server_full_response() {
+    use arcanum::proc::http_server::HttpServerHandle;
+
+    let env = setup();
+    let http_server_proc = ProcessId {
+        namespace: "sys".into(),
+        app: "http-server".into(),
+        proc: "entrypoint".into(),
+    };
+    let server = HttpServerHandle::new(env.scheduler.clone(), 0, http_server_proc.clone()).await;
+    let port = server.port;
+    env.manager
+        .register_stateless(http_server_proc.clone(), server.sender());
+
+    add_package(
+        &env.store,
+        "test",
+        "fullresp",
+        r#"return {
+            entrypoint = function(ctx, msg)
+                return {
+                    status = 201,
+                    headers = {["X-Custom"] = "hello"},
+                    body = {created = true, id = msg.body},
+                }
+            end,
+        }"#,
+    )
+    .await;
+
+    let http_server_proc = ProcessId {
+        namespace: "sys".into(),
+        app: "http-server".into(),
+        proc: "entrypoint".into(),
+    };
+
+    env.scheduler
+        .add_proposal(Proposal {
+            process: http_server_proc.clone(),
+            event: None,
+            input: msgpack_value(&serde_json::json!({
+                "action": "add",
+                "app": "test/fullresp",
+                "host": "full.example.com",
+            })),
+            promise: None,
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
+        })
+        .await;
+
+    wait_for_empty_schedule(&env.scheduler, &http_server_proc, Duration::from_secs(2)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/create-thing", port))
+        .header("Host", "full.example.com")
+        .body("thing-1")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 201);
+    assert_eq!(
+        resp.headers().get("x-custom").unwrap().to_str().unwrap(),
+        "hello"
+    );
+    let body: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert_eq!(body["data"]["created"], true);
+    assert_eq!(body["data"]["id"], "thing-1");
+}
+
+// --- Test 11b: HTTP server full response with string body ---
+
+#[tokio::test]
+async fn test_http_server_full_response_string_body() {
+    use arcanum::proc::http_server::HttpServerHandle;
+
+    let env = setup();
+    let http_server_proc = ProcessId {
+        namespace: "sys".into(),
+        app: "http-server".into(),
+        proc: "entrypoint".into(),
+    };
+    let server = HttpServerHandle::new(env.scheduler.clone(), 0, http_server_proc.clone()).await;
+    let port = server.port;
+    env.manager
+        .register_stateless(http_server_proc.clone(), server.sender());
+
+    add_package(
+        &env.store,
+        "test",
+        "htmlresp",
+        r#"return {
+            entrypoint = function(ctx, msg)
+                return {
+                    status = 200,
+                    headers = {["Content-Type"] = "text/html"},
+                    body = "<h1>Hello</h1>",
+                }
+            end,
+        }"#,
+    )
+    .await;
+
+    let http_server_proc = ProcessId {
+        namespace: "sys".into(),
+        app: "http-server".into(),
+        proc: "entrypoint".into(),
+    };
+
+    env.scheduler
+        .add_proposal(Proposal {
+            process: http_server_proc.clone(),
+            event: None,
+            input: msgpack_value(&serde_json::json!({
+                "action": "add",
+                "app": "test/htmlresp",
+                "host": "html.example.com",
+            })),
+            promise: None,
+            from: ProcessId {
+                namespace: String::new(),
+                app: String::new(),
+                proc: String::new(),
+            },
+        })
+        .await;
+
+    wait_for_empty_schedule(&env.scheduler, &http_server_proc, Duration::from_secs(2)).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/", port))
+        .header("Host", "html.example.com")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "text/html"
+    );
+    let body: serde_json::Value = serde_json::from_str(&resp.text().await.unwrap()).unwrap();
+    assert_eq!(body["data"], "<h1>Hello</h1>");
 }
 
 // --- Test 11: HTTP server returns 404 for unregistered host ---

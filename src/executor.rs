@@ -48,7 +48,7 @@ async fn parse_syscall(
     log_seq: u64,
     state: &StateHandle,
     current_process: &types::ProcessId,
-) -> Syscall {
+) -> Result<Syscall, String> {
     let sys_type = extract_str(value, "type");
     let args = value
         .as_table()
@@ -64,7 +64,7 @@ async fn parse_syscall(
                 .get(current_process.clone(), key.clone())
                 .await
                 .unwrap_or_default();
-            Syscall::KVRead { key, current_value }
+            Ok(Syscall::KVRead { key, current_value })
         }
         "kv_set" => {
             let key = args
@@ -75,7 +75,7 @@ async fn parse_syscall(
                 .as_ref()
                 .and_then(|a| a.get::<String>(2).ok())
                 .unwrap_or_default();
-            Syscall::KVWrite { key, new_value }
+            Ok(Syscall::KVWrite { key, new_value })
         }
         "sql_exec" => {
             let sql: String = args
@@ -83,7 +83,7 @@ async fn parse_syscall(
                 .and_then(|a| a.get(1).ok())
                 .unwrap_or_default();
             let params = extract_sql_params(&args);
-            Syscall::SqlExec { sql, params }
+            Ok(Syscall::SqlExec { sql, params })
         }
         "sql_query" => {
             let sql: String = args
@@ -91,7 +91,7 @@ async fn parse_syscall(
                 .and_then(|a| a.get(1).ok())
                 .unwrap_or_default();
             let params = extract_sql_params(&args);
-            Syscall::SqlQuery { sql, params }
+            Ok(Syscall::SqlQuery { sql, params })
         }
         "call" => {
             let target: String = args
@@ -109,7 +109,7 @@ async fn parse_syscall(
                 .and_then(|a| a.get::<mlua::Value>(2).ok())
                 .map(|v| mlua_value_to_bytes(&v))
                 .unwrap_or_default();
-            Syscall::Call {
+            Ok(Syscall::Call {
                 proposal: Proposal {
                     process,
                     event: None,
@@ -120,7 +120,7 @@ async fn parse_syscall(
                     }),
                     from: current_process.clone(),
                 },
-            }
+            })
         }
         "notify" => {
             let target: String = args
@@ -138,7 +138,7 @@ async fn parse_syscall(
                 .and_then(|a| a.get::<mlua::Value>(2).ok())
                 .map(|v| mlua_value_to_bytes(&v))
                 .unwrap_or_default();
-            Syscall::Notify {
+            Ok(Syscall::Notify {
                 proposal: Proposal {
                     process,
                     event: None,
@@ -146,7 +146,7 @@ async fn parse_syscall(
                     promise: None,
                     from: current_process.clone(),
                 },
-            }
+            })
         }
         "register" => {
             let template: String = args
@@ -167,12 +167,12 @@ async fn parse_syscall(
                 app: current_process.app.clone(),
                 handler: template,
             };
-            Syscall::Register {
+            Ok(Syscall::Register {
                 process: new_process,
                 handler,
-            }
+            })
         }
-        _ => panic!("Unknown syscall type: {}", sys_type),
+        _ => Err(format!("Unknown syscall type: {}", sys_type)),
     }
 }
 
@@ -366,14 +366,37 @@ pub async fn run_executor(
                         event,
                         mlua_to_json(&mlua::Value::Table(table.clone()))
                     );
-                    let syscall = parse_syscall(
+                    let syscall = match parse_syscall(
                         &mlua::Value::Table(table),
                         &event,
                         log_seq,
                         &state,
                         &process,
                     )
-                    .await;
+                    .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => {
+                            tracing::error!("event={} {}", event, e);
+                            let err_table = lua.create_table().unwrap();
+                            err_table.set("error", e.to_string()).unwrap();
+                            let returns = mlua_value_to_bytes(&mlua::Value::Table(err_table));
+                            let receipt = Receipt {
+                                proposal: proposal.clone(),
+                                in_event_seq,
+                                in_log_seq: log_seq,
+                                syscalls: Vec::new(),
+                                returns,
+                                status: RuntimeStatus::Error,
+                            };
+                            scheduler
+                                .satisfy(proposal.clone(), receipt, true)
+                                .await
+                                .unwrap();
+                            threads.remove(&event);
+                            break;
+                        }
+                    };
                     tracing::debug!("event={} Parsed syscall: {:?}", event, syscall);
 
                     let receipt = Receipt {

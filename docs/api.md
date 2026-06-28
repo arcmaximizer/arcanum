@@ -287,27 +287,53 @@ When an HTTP request arrives for a registered route, the target process
 receives it from `^sys/http-server`:
 
 - `ctx.from` is `^sys/http-server`
-- `msg` is the HTTP body. If the body is valid JSON it is parsed as JSON;
-  otherwise it arrives as a string.
+- `msg` is a table containing the full request:
+  - `method` - the HTTP method (e.g. `"GET"`, `"POST"`)
+  - `path` - the URL path (e.g. `"/users/42"`)
+  - `query` - query parameters as a table (e.g. `{page = "2", sort = "name"}`)
+  - `headers` - request headers as a table
+  - `body` - the raw request body as a string
 - The Host header determines routing — the path is not used for routing but
   can be handled by the app.
 
 ```lua
 function entrypoint(ctx, msg)
-    -- msg is the HTTP body (parsed from JSON if applicable)
+    -- msg is a table with method, path, query, headers, body
+    local method = msg.method   -- "GET", "POST", etc.
+    local path = msg.path       -- "/users/42"
+    local body = msg.body       -- raw body string
     return "response data"
 end
 ```
 
 ### HTTP Response
 
-The process's return value becomes the HTTP response:
+The process's return value becomes the HTTP response. There are two modes:
 
-- If the handler returns `nil`: `204 No Content`
-- If the handler returns a value: `200 OK` with the handler's return value
-  wrapped in `{"data": ...}` as JSON.
-- If the handler errors: `500 Internal Server Error` with the error message.
-- If the handler takes longer than 30 seconds: `504 Gateway Timeout`.
+**Primitive return** (string, number, boolean, nil) — backwards compatible:
+
+- `nil` → `204 No Content`
+- any primitive → `200 OK` with `{"data": <value>}` as JSON
+
+**Table return** — full control over status, headers, and body:
+
+- `"body"` key is **required** to signal full control mode
+- `"status"` (optional, default 200) — the HTTP status code
+- `"headers"` (optional) — response headers as a table
+- If the handler errors: `500 Internal Server Error`
+- If the handler takes longer than 30 seconds: `504 Gateway Timeout`
+
+```lua
+-- Primitive return (backward compatible)
+return "hello"    -- 200 {"data": "hello"}
+
+-- Full control return
+return {
+    status = 201,
+    headers = {["Location"] = "/users/42", ["X-Custom"] = "value"},
+    body = {created = true, name = "alice"},
+}
+```
 
 ### Registration from Lua
 
